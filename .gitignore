@@ -1,0 +1,32 @@
+# Node.js
+node_modules/
+dist/
+*.js.map
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.code-workspace
+
+# Binary / generated docs
+*.docx
+*.xlsx
+*.pdf
+
+# Logs & DB
+*.log
+*.db
+*.db-shm
+*.db-wal
+
+# Not HiBA-related
+swagger-cli.ts
+swagger-cli-package.json
+2026-*-adjectives*.md
+2026-*-particles*.md

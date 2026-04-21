@@ -1,0 +1,19 @@
+{
+  "name": "hiba-core",
+  "version": "0.1.0",
+  "description": "HiBA-AB TypeScript runtime core — ToolRegistry, defineTool, HiBAToolbox",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test --require ts-node/register hiba.toolbox.test.ts"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.4.0"
+  }
+}

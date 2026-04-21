@@ -1,0 +1,156 @@
+
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:var(--font-sans)}
+.phase{margin-bottom:18px;border:1px solid var(--color-border-tertiary);border-radius:12px;overflow:hidden}
+.phase-header{display:flex;align-items:center;gap:10px;padding:12px 16px;cursor:pointer;background:var(--color-background-secondary);user-select:none}
+.phase-header:hover{background:var(--color-background-tertiary)}
+.phase-tag{font-size:11px;font-weight:500;padding:2px 8px;border-radius:20px;white-space:nowrap}
+.phase-title{font-size:14px;font-weight:500;color:var(--color-text-primary);flex:1}
+.phase-count{font-size:12px;color:var(--color-text-tertiary);white-space:nowrap}
+.chevron{font-size:10px;color:var(--color-text-tertiary);transition:transform .2s}
+.phase-body{padding:12px 16px;display:none;border-top:1px solid var(--color-border-tertiary)}
+.phase-body.open{display:block}
+.step{display:flex;align-items:flex-start;gap:10px;padding:7px 0;border-bottom:1px solid var(--color-border-tertiary)}
+.step:last-child{border-bottom:none}
+.step input[type=checkbox]{margin-top:2px;flex-shrink:0;cursor:pointer;width:15px;height:15px}
+.step-content{flex:1}
+.step-label{font-size:13px;color:var(--color-text-primary);line-height:1.5}
+.step-label.done{text-decoration:line-through;color:var(--color-text-tertiary)}
+.step-sub{font-size:12px;color:var(--color-text-secondary);margin-top:3px;font-family:var(--font-mono);background:var(--color-background-tertiary);padding:4px 8px;border-radius:6px;line-height:1.6;word-break:break-all}
+.badge{font-size:11px;padding:1px 7px;border-radius:10px;margin-left:6px;font-weight:500}
+.badge-a3{background:#E1F5EE;color:#085041}
+.badge-c{background:#EEEDFE;color:#3C3489}
+.badge-warn{background:#FAEEDA;color:#633806}
+.progress-bar{height:4px;background:var(--color-border-tertiary);border-radius:2px;margin:0 16px 12px}
+.progress-fill{height:100%;background:#1D9E75;border-radius:2px;transition:width .3s}
+</style>
+
+<div style="padding:4px 0 12px">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+    <span style="font-size:14px;font-weight:500;color:var(--color-text-primary)">測試進度</span>
+    <span id="total-count" style="font-size:12px;color:var(--color-text-secondary)">0 / 0 完成</span>
+  </div>
+  <div class="progress-bar"><div class="progress-fill" id="total-fill" style="width:0%"></div></div>
+</div>
+
+<div id="phases"></div>
+
+<script>
+const data = [
+  {
+    id:'p0', color:'#E6F1FB', textColor:'#0C447C', tag:'Phase 0',
+    title:'網路確認（5 分鐘）',
+    steps:[
+      {label:'確認三台設備在同一網段', sub:'ping 192.168.1.1  # 路由器通即可'},
+      {label:'記錄各設備 IP', sub:'PC: 192.168.1.10  RPi-01: 192.168.1.11  RPi-02: 192.168.1.12\n（依實際調整，後續步驟全以此為準）'},
+      {label:'PC 能 ping 到兩台 RPi', sub:'ping 192.168.1.11 && ping 192.168.1.12'},
+    ]
+  },
+  {
+    id:'p1', color:'#E1F5EE', textColor:'#085041', tag:'Phase 1',
+    title:'PC（Accounting Server）安裝',
+    steps:[
+      {label:'安裝 Node.js 20 LTS', sub:'# Ubuntu\ncurl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -\nsudo apt install -y nodejs'},
+      {label:'建立 HiBA-AB 專案目錄並安裝依賴', sub:'mkdir hiba-ab && cd hiba-ab\nnpm init -y\nnpm install express better-sqlite3 dotenv uuid'},
+      {label:'建立 .env 設定檔', sub:'AGENT_ID=orchestrator\nPLANNER_MODE=rule\nSERVER_PORT=3000\nDB_PATH=./hiba.db\nNODE_ENV=development'},
+      {label:'初始化 SQLite（TrustRegistry + AuditTrail）', sub:'# 執行 schema migration\nnode scripts/migrate.js\n# 確認：hiba.db 出現，trust_registry / audit_log 兩張表存在'},
+      {label:'啟動 HiBA-AB server', sub:'node src/index.js\n# 預期看到：HiBA-AB listening on port 3000'},
+      {label:'瀏覽器確認 Admin 頁正常', sub:'http://192.168.1.10:3000/admin\n# 應看到 ToolRegistry 瀏覽器（空的）和 node-list（空的）'},
+    ]
+  },
+  {
+    id:'p2', color:'#FAEEDA', textColor:'#633806', tag:'Phase 2',
+    title:'兩台 RPi 安裝輕量 Agent 並完成節點註冊',
+    steps:[
+      {label:'RPi 安裝 Node.js 18', sub:'sudo apt update && sudo apt install -y nodejs\nnode -v  # 確認 >= 18'},
+      {label:'在 PC Admin 頁為 RPi-01 產生 enroll token', sub:'http://192.168.1.10:3000/admin → 「新增節點」→ 複製 token\n（token 有效期 10 分鐘）', badge:'warn', badgeText:'網頁操作'},
+      {label:'RPi-01 執行一行註冊指令', sub:'curl -s http://192.168.1.10:3000/enroll.sh \\\n  | bash -s -- --token <TOKEN> --name plc-01 --port 8080\n# 完成後 Agent 自動在背景持續運行'},
+      {label:'確認 Admin 頁 plc-01 上線', sub:'node-list 應顯示：plc-01 | online | tools: 0 | identity: software-keypair', badge:'warn', badgeText:'驗收點'},
+      {label:'對 RPi-02 重複上述三步（name=plc-02）', sub:'# 同步驟，只改 --name plc-02\n# 完成後 node-list 有兩筆 online 記錄'},
+    ]
+  },
+  {
+    id:'p3', color:'#EEEDFE', textColor:'#3C3489', tag:'Phase 3',
+    title:'核心測試：A3 資源決策（工具自動安裝）',
+    steps:[
+      {label:'在 Operator 頁輸入自然語言意圖', sub:'「讀取 plc-01 的感測器狀態」\n→ 點送出，觸發 plan() → ExecutionPlan 產生', badge:'c', badgeText:'C6'},
+      {label:'觀察 ExecutionPlan 視覺化', sub:'step-01 狀態：灰（pending）→ 黃（executing）\n後台 log 應出現：TOOL_NOT_FOUND → canInstall(plc-01)=true → installing plc.readSensor', badge:'a3', badgeText:'A3 install'},
+      {label:'確認 RPi-01 收到並安裝工具', sub:'# RPi-01 terminal 應看到：\n[agent] received tool definition: plc.readSensor v1.0.0\n[agent] installed to ~/.hiba/tools/plc.readSensor.sh\n[agent] executing...'},
+      {label:'step-01 狀態變綠，回傳模擬感測器資料', sub:'{"sensorId":"temp-01","value":24.5,"unit":"°C","timestamp":"..."}\n# Admin 頁 plc-01 的 tools 計數從 0 → 1', badge:'warn', badgeText:'驗收點'},
+      {label:'再次觸發相同意圖，確認不會重複安裝', sub:'第二次執行應直接 execute，不再走 install 路徑\n（isStale() 檢查版本相同 → 跳過安裝）', badge:'a3', badgeText:'A3 execute'},
+    ]
+  },
+  {
+    id:'p4', color:'#FAECE7', textColor:'#712B13', tag:'Phase 4',
+    title:'論文實驗驗證（C4、C5、AuditTrail）',
+    steps:[
+      {label:'C4 — 權限隔離：plc-01 嘗試越界呼叫', sub:'# 直接 POST 越界 tool（例如 user.create）\ncurl -X POST http://192.168.1.10:3000/api/execute \\\n  -d \'{"toolName":"user.create","agentId":"plc-01",...}\'\n# 預期：{"code":"TOOL_NOT_FOUND"}（Toolbox 攔截，非 runtime 錯誤）', badge:'c', badgeText:'C4'},
+      {label:'C5 — 容錯：關閉 plc-02 Agent，觀察 partial-success', sub:'# RPi-02 terminal：kill <agent-pid>\n# 同時對兩台 PLC 派任務\n# 預期：plc-01 成功、plc-02 超時，Orchestrator 回傳 1/2 partial-success', badge:'c', badgeText:'C5'},
+      {label:'驗證 AuditTrail 完整性', sub:'http://192.168.1.10:3000/admin → AuditTrail\n確認每筆記錄有：stepId / toolName / inputHash / outputHash / timestamp\ninstall 事件也應在 audit log 中'},
+      {label:'C4 重啟 plc-02 Agent，確認自動重新上線', sub:'# RPi-02：node ~/.hiba/agent.js &\n# Admin 頁 plc-02 狀態回到 online（不需重新 enroll）'},
+      {label:'完整 workflow 測試：兩台 PLC 並行執行', sub:'「同時讀取兩台 PLC 的溫度並比較」\n→ ExecutionPlan 有兩個 parallel steps\n→ 兩個結果聚合後回傳，AuditTrail 有兩筆獨立 hash', badge:'c', badgeText:'C1 C2'},
+    ]
+  },
+];
+
+let checks = {};
+
+function countAll(){let t=0,d=0;data.forEach(ph=>ph.steps.forEach((_,i)=>{t++;if(checks[ph.id+'-'+i])d++;}));return{t,d};}
+function updateProgress(){
+  const{t,d}=countAll();
+  document.getElementById('total-count').textContent=d+' / '+t+' 完成';
+  document.getElementById('total-fill').style.width=(t?d/t*100:0)+'%';
+  data.forEach(ph=>{
+    const steps=ph.steps;
+    const done=steps.filter((_,i)=>checks[ph.id+'-'+i]).length;
+    const el=document.getElementById('count-'+ph.id);
+    if(el)el.textContent=done+'/'+steps.length;
+    const fill=document.getElementById('fill-'+ph.id);
+    if(fill)fill.style.width=(steps.length?done/steps.length*100:0)+'%';
+  });
+}
+
+function toggle(phId,i){
+  checks[phId+'-'+i]=!checks[phId+'-'+i];
+  const lbl=document.getElementById('lbl-'+phId+'-'+i);
+  if(lbl)lbl.classList.toggle('done',checks[phId+'-'+i]);
+  updateProgress();
+}
+
+function togglePhase(phId){
+  const body=document.getElementById('body-'+phId);
+  const chev=document.getElementById('chev-'+phId);
+  const open=body.classList.toggle('open');
+  chev.style.transform=open?'rotate(90deg)':'';
+}
+
+const container=document.getElementById('phases');
+data.forEach(ph=>{
+  const div=document.createElement('div');
+  div.className='phase';
+  const stepsHtml=ph.steps.map((s,i)=>`
+    <div class="step">
+      <input type="checkbox" id="cb-${ph.id}-${i}" onchange="toggle('${ph.id}',${i})">
+      <div class="step-content">
+        <div class="step-label" id="lbl-${ph.id}-${i}">${s.label}${s.badge?`<span class="badge badge-${s.badge}">${s.badgeText}</span>`:''}
+        </div>
+        ${s.sub?`<div class="step-sub">${s.sub.replace(/\n/g,'<br>')}</div>`:''}
+      </div>
+    </div>`).join('');
+  div.innerHTML=`
+    <div class="phase-header" onclick="togglePhase('${ph.id}')">
+      <span class="phase-tag" style="background:${ph.color};color:${ph.textColor}">${ph.tag}</span>
+      <span class="phase-title">${ph.title}</span>
+      <span class="phase-count" id="count-${ph.id}">0/${ph.steps.length}</span>
+      <span class="chevron" id="chev-${ph.id}">▶</span>
+    </div>
+    <div class="progress-bar" style="margin:8px 16px 0"><div class="progress-fill" id="fill-${ph.id}" style="width:0%"></div></div>
+    <div class="phase-body" id="body-${ph.id}">${stepsHtml}</div>`;
+  container.appendChild(div);
+});
+
+document.getElementById('body-p0').classList.add('open');
+document.getElementById('chev-p0').style.transform='rotate(90deg)';
+updateProgress();
+</script>

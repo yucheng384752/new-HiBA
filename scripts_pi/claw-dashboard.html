@@ -1,0 +1,1493 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claw Dashboard — Sub-Web 主控介面</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0b0d12; --surface: #0e1218; --border: #1a2030;
+    --text: #b8c8d8; --text-bright: #e0ecf8; --muted: #4a6080;
+    --accent: #3d8de8; --green: #3de88a; --amber: #e8a83d;
+    --red: #e83d3d; --purple: #9a5ae8;
+    /* aliases kept for backward compat */
+    --yellow: #e8a83d; --blue: #3d8de8;
+  }
+
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; font-size: 14px; }
+
+  header { background: var(--surface); border-bottom: 1px solid var(--border); padding: 12px 24px; display: flex; align-items: center; gap: 16px; }
+  header h1 { font-size: 18px; font-weight: 600; }
+  header span { color: var(--muted); font-size: 12px; }
+
+  .layout { display: grid; grid-template-columns: 300px 1fr; gap: 1px; height: calc(100vh - 49px); background: var(--border); }
+
+  .panel { background: var(--bg); overflow-y: auto; }
+
+  /* ── Left Panel ── */
+  .nodes-panel { background: var(--surface); }
+  .panel-title { padding: 12px 16px; font-size: 10px; font-weight: 600; font-family: 'Consolas', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+  .panel-title button { background: var(--accent); color: #000; border: none; border-radius: 4px; padding: 3px 10px; font-size: 11px; cursor: pointer; font-weight: 600; }
+  .panel-title button:hover { opacity: .85; }
+
+  .add-node { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
+  .add-node input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 6px 10px; font-size: 13px; }
+  .add-node input:focus { outline: none; border-color: var(--accent); }
+  .add-node button { background: var(--accent); color: #000; border: none; border-radius: 6px; padding: 6px 12px; font-weight: 600; cursor: pointer; }
+
+  .node-card { padding: 12px 16px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .1s; }
+  .node-card:hover { background: rgba(88,166,255,.05); }
+  .node-card.active { background: rgba(88,166,255,.1); border-left: 3px solid var(--accent); }
+  .node-header { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex-shrink: 0; }
+  .dot.online { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .dot.offline { background: var(--red); }
+  .dot.checking { background: var(--yellow); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:.4 } }
+  .node-id { font-weight: 600; font-size: 13px; }
+  .node-url { font-size: 11px; color: var(--muted); }
+  .node-meta { font-size: 11px; color: var(--muted); margin-top: 4px; display: flex; gap: 12px; }
+
+  /* ── Right Panel ── */
+  .main-panel { background: var(--bg); display: flex; flex-direction: column; }
+
+  .tabs { display: flex; border-bottom: 1px solid var(--border); background: var(--surface); padding: 0 16px; }
+  .tab { padding: 10px 16px; cursor: pointer; border-bottom: 2px solid transparent; font-size: 13px; color: var(--muted); }
+  .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  .tab-content { flex: 1; overflow-y: auto; padding: 20px; }
+  .tab-pane { display: none; }
+  .tab-pane.active { display: block; }
+
+  /* Health */
+  .health-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .health-card { background: var(--surface); border: 1px solid var(--border); border-top: 2px solid var(--border); border-radius: 8px; padding: 16px; }
+  .health-card.ok     { border-top-color: var(--green); }
+  .health-card.warn   { border-top-color: var(--amber); }
+  .health-card.err    { border-top-color: var(--red); }
+  .health-card.info   { border-top-color: var(--accent); }
+  .health-card .label { font-size: 10px; font-family: 'Consolas', monospace; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 6px; }
+  .health-card .value { font-size: 18px; font-weight: 600; color: var(--text-bright); }
+  .health-card .value.sm { font-size: 13px; }
+  .health-raw { background: var(--surface); border: 1px solid var(--border); border-top: 2px solid var(--border); border-radius: 8px; padding: 16px; }
+  .health-raw .label { font-size: 10px; font-family: 'Consolas', monospace; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin-bottom: 8px; }
+  .health-raw pre { font-size: 12px; color: var(--green); font-family: 'Consolas', monospace; white-space: pre-wrap; }
+
+  /* Scripts */
+  .script-list { display: flex; flex-direction: column; gap: 12px; }
+  .script-item { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .script-header { padding: 12px 16px; display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .script-header:hover { background: rgba(255,255,255,.03); }
+  .script-name { font-weight: 600; font-size: 13px; }
+  .script-desc { color: var(--muted); font-size: 12px; flex: 1; }
+  .badge { padding: 2px 8px; border-radius: 10px; font-size: 10px; font-weight: 600; text-transform: uppercase; }
+  .badge.table { background: rgba(88,166,255,.2); color: var(--accent); }
+  .badge.status { background: rgba(63,185,80,.2); color: var(--green); }
+  .badge.chart { background: rgba(188,140,255,.2); color: var(--purple); }
+  .badge.text { background: rgba(139,148,158,.2); color: var(--muted); }
+  .script-body { border-top: 1px solid var(--border); padding: 16px; display: none; }
+  .script-body.open { display: block; }
+
+  .form-grid { display: grid; gap: 10px; margin-bottom: 14px; }
+  .form-field label { display: block; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+  .form-field label span { color: var(--red); margin-left: 2px; }
+  .form-field input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 13px; }
+  .form-field input:focus { outline: none; border-color: var(--accent); }
+  .run-btn { background: var(--green); color: #000; border: none; border-radius: 6px; padding: 8px 20px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  .run-btn:hover { opacity: .85; }
+  .run-btn:disabled { opacity: .4; cursor: not-allowed; }
+
+  /* File attachment widget */
+  .attach-bar { display:flex; align-items:center; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  .attach-btn { background:none; border:1px dashed var(--border); border-radius:6px; color:var(--muted); padding:5px 12px; font-size:11px; cursor:pointer; transition:all .15s; white-space:nowrap; }
+  .attach-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .attach-badge { display:inline-flex; align-items:center; gap:6px; background:rgba(88,166,255,.1); border:1px solid rgba(88,166,255,.3); border-radius:6px; padding:4px 10px; font-size:11px; color:var(--accent); }
+  .attach-badge .clr { background:none; border:none; color:var(--muted); cursor:pointer; font-size:15px; line-height:1; padding:0 0 0 2px; }
+  .attach-badge .clr:hover { color:var(--red); }
+
+  /* Result */
+  .result-box { margin-top: 14px; border: 1px solid var(--border); border-top: 2px solid var(--border); border-radius: 8px; padding: 14px; }
+  .result-box.ok  { border-top-color: var(--green); }
+  .result-box.err { border-top-color: var(--red); }
+  .result-meta { display: flex; gap: 16px; margin-bottom: 10px; font-size: 10px; font-family: 'Consolas', monospace; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+  .result-success { color: var(--green); }
+  .result-error { color: var(--red); }
+
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th { text-align: left; padding: 6px 10px; background: var(--bg); color: var(--muted); font-size: 11px; border-bottom: 1px solid var(--border); }
+  td { padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  tr:hover td { background: rgba(255,255,255,.02); }
+
+  .status-light { display: inline-flex; align-items: center; gap: 10px; font-size: 16px; font-weight: 600; padding: 12px 20px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); }
+
+  .chart-bar-wrap { display: flex; flex-direction: column; gap: 8px; }
+  .bar-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+  .bar-row .bar-label { width: 80px; color: var(--muted); text-align: right; }
+  .bar-track { flex: 1; height: 16px; background: var(--border); border-radius: 4px; overflow: hidden; }
+  .bar-fill { height: 100%; background: var(--purple); border-radius: 4px; transition: width .4s; }
+  .bar-val { width: 40px; color: var(--text); }
+
+  /* Stream */
+  .stream-log { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 0; height: calc(100vh - 200px); overflow-y: auto; font-family: 'Consolas', monospace; font-size: 12px; }
+  .stream-log-header { display: grid; grid-template-columns: 70px 80px 100px 1fr 1fr 120px; gap: 0; padding: 6px 12px; background: var(--bg); border-bottom: 1px solid var(--border); font-size: 10px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); position: sticky; top: 0; }
+  .stream-log .entry { display: grid; grid-template-columns: 70px 80px 100px 1fr 1fr 120px; gap: 0; padding: 5px 12px; border-bottom: 1px solid rgba(26,32,48,.6); }
+  .stream-log .entry:hover { background: rgba(61,141,232,.04); }
+  .stream-log .entry.open-evt  { border-left: 2px solid var(--green); }
+  .stream-log .entry.done-evt  { border-left: 2px solid var(--green); }
+  .stream-log .entry.err-evt   { border-left: 2px solid var(--red); }
+  .stream-log .entry.raw-evt   { border-left: 2px solid var(--border); }
+  .s-ts    { color: var(--muted); }
+  .s-evt   { color: var(--amber); }
+  .s-agent { color: var(--accent); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s-tool  { color: var(--purple); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .s-trace { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+  .s-hash  { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; }
+  .stream-ctrl { display: flex; gap: 8px; margin-bottom: 12px; align-items: center; }
+  .stream-ctrl button { background: var(--surface); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 14px; cursor: pointer; font-size: 12px; }
+  .stream-ctrl button:hover { border-color: var(--accent); color: var(--accent); }
+  .stream-ctrl button.stop { border-color: var(--red); color: var(--red); }
+
+  /* Execute tab */
+  .exec-form { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; max-width: 600px; }
+  .exec-form h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--accent); }
+  .exec-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; }
+  .exec-row select { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 13px; width: 100%; }
+  .exec-row select:focus { outline: none; border-color: var(--accent); }
+  .trace-id { font-size: 11px; color: var(--muted); margin-bottom: 14px; }
+  .trace-id code { color: var(--yellow); }
+
+  .empty-state { text-align: center; padding: 60px 20px; color: var(--muted); }
+  .empty-state .icon { font-size: 40px; margin-bottom: 12px; }
+
+  .toast { position: fixed; bottom: 24px; right: 24px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 12px 18px; font-size: 13px; z-index: 999; animation: slideUp .2s; }
+  @keyframes slideUp { from { transform: translateY(16px); opacity:0; } }
+
+
+  /* Deploy Tab */
+  .deploy-form { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 20px; max-width: 680px; }
+  .deploy-form h3 { font-size: 14px; font-weight: 600; margin-bottom: 14px; color: var(--accent); display:flex; align-items:center; justify-content:space-between; }
+  .deploy-mode-toggle { display:flex; gap:2px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:2px; }
+  .deploy-mode-btn { background:none; border:none; color:var(--muted); padding:4px 14px; border-radius:4px; font-size:12px; cursor:pointer; font-weight:500; }
+  .deploy-mode-btn.active { background:var(--accent); color:#000; font-weight:600; }
+  .deploy-drop { border: 2px dashed var(--border); border-radius: 8px; padding: 28px; text-align: center; color: var(--muted); cursor: pointer; transition: all .2s; margin-bottom: 14px; }
+  .deploy-drop:hover, .deploy-drop.drag-over { border-color: var(--accent); color: var(--accent); background: rgba(88,166,255,.05); }
+  .deploy-drop .drop-hint { font-size: 11px; margin-top:4px; }
+  .deploy-preview { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; margin-bottom: 14px; font-family: Consolas, monospace; font-size: 11px; color: var(--green); max-height: 180px; overflow-y: auto; white-space: pre; }
+  .deploy-meta { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 14px; }
+  .deploy-meta label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 4px; }
+  .deploy-meta input, .deploy-meta select { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; color: var(--text); padding: 7px 10px; font-size: 13px; }
+  .deploy-meta input:focus, .deploy-meta select:focus { outline: none; border-color: var(--accent); }
+  .deploy-overwrite { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; font-size: 12px; color: var(--muted); }
+  .deploy-btn { background: var(--accent); color: #000; border: none; border-radius: 6px; padding: 8px 24px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  .deploy-btn:hover { opacity: .85; }
+  .deploy-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .deploy-log-entry { display: flex; gap: 10px; align-items: flex-start; padding: 8px 12px; border-radius: 6px; margin-bottom: 6px; font-size: 12px; }
+  .deploy-log-entry.success { background: rgba(63,185,80,.1); border: 1px solid rgba(63,185,80,.3); }
+  .deploy-log-entry.error { background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.3); }
+  .deploy-log-entry.pending { background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.3); }
+  .deploy-history { margin-top: 20px; }
+  .deploy-history h4 { font-size: 11px; color: var(--muted); letter-spacing:.06em; text-transform:uppercase; margin-bottom: 10px; }
+  .history-item { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 6px; font-size: 12px; }
+  .history-item .hi-name { font-weight: 600; color: var(--text); }
+  .history-item .hi-meta { color: var(--muted); font-size: 11px; }
+  .history-item .hi-del { background: none; border: 1px solid var(--red); color: var(--red); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; }
+  .history-item .hi-del:hover { background: rgba(248,81,73,.1); }
+
+  .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* ── Health Refresh Bar ── */
+  .refresh-bar { display:flex; align-items:center; gap:6px; padding:0 0 14px; font-size:12px; color:var(--muted); flex-wrap:wrap; }
+  .refresh-btn { background:var(--surface); border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:3px 10px; font-size:11px; cursor:pointer; transition:all .1s; }
+  .refresh-btn.active { background:var(--accent); border-color:var(--accent); color:#000; font-weight:600; }
+  .refresh-btn:hover:not(.active) { border-color:var(--accent); color:var(--accent); }
+
+  /* ── Favorites ── */
+  .fav-star { background:none; border:none; color:var(--muted); font-size:16px; cursor:pointer; padding:0 4px; line-height:1; flex-shrink:0; transition:color .1s; }
+  .fav-star.active { color:var(--yellow); }
+  .fav-star:hover { color:var(--yellow); }
+  .section-label { font-size:10px; font-family:'Consolas',monospace; text-transform:uppercase; letter-spacing:.08em; color:var(--muted); padding:14px 0 8px; font-weight:600; display:flex; align-items:center; gap:8px; }
+  .section-label:first-child { padding-top:0; }
+
+  /* ── Curl Tab ── */
+  .curl-layout { display:grid; grid-template-columns:220px 1fr; gap:16px; height:calc(100vh - 115px); }
+  .curl-saved { background:var(--surface); border:1px solid var(--border); border-radius:8px; display:flex; flex-direction:column; overflow:hidden; }
+  .curl-saved-title { padding:10px 14px; font-size:11px; font-weight:600; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); border-bottom:1px solid var(--border); display:flex; justify-content:space-between; align-items:center; }
+  .curl-saved-list { flex:1; overflow-y:auto; }
+  .curl-saved-item { padding:10px 14px; border-bottom:1px solid var(--border); cursor:pointer; transition:background .1s; }
+  .curl-saved-item:hover { background:rgba(88,166,255,.05); }
+  .curl-saved-item.active { background:rgba(88,166,255,.1); border-left:3px solid var(--accent); }
+  .curl-saved-item .ci-name { font-size:12px; font-weight:600; color:var(--text); margin-bottom:3px; }
+  .curl-saved-item .ci-meta { font-size:10px; color:var(--muted); display:flex; gap:6px; align-items:center; min-width:0; }
+  .curl-saved-item .ci-url { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .curl-saved-item .ci-del { background:none; border:none; color:var(--muted); font-size:14px; cursor:pointer; padding:0; flex-shrink:0; }
+  .curl-saved-item .ci-del:hover { color:var(--red); }
+  .mbadge { padding:1px 5px; border-radius:3px; font-size:9px; font-weight:700; text-transform:uppercase; }
+  .mbadge.get  { background:rgba(63,185,80,.2); color:var(--green); }
+  .mbadge.post { background:rgba(88,166,255,.2); color:var(--accent); }
+  .mbadge.put  { background:rgba(210,153,34,.2); color:var(--yellow); }
+  .mbadge.delete { background:rgba(248,81,73,.2); color:var(--red); }
+  .mbadge.patch  { background:rgba(188,140,255,.2); color:var(--purple); }
+  .curl-main { display:flex; flex-direction:column; gap:10px; overflow-y:auto; min-width:0; }
+  .curl-req-bar { display:flex; gap:8px; }
+  .curl-method { background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:7px 10px; font-size:13px; font-weight:600; cursor:pointer; min-width:100px; }
+  .curl-method:focus { outline:none; border-color:var(--accent); }
+  .curl-url-input { flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:7px 10px; font-size:13px; font-family:'Consolas',monospace; }
+  .curl-url-input:focus { outline:none; border-color:var(--accent); }
+  .curl-send-btn { background:var(--accent); color:#000; border:none; border-radius:6px; padding:7px 18px; font-weight:600; cursor:pointer; font-size:13px; white-space:nowrap; }
+  .curl-send-btn:hover { opacity:.85; }
+  .curl-send-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .curl-section { background:var(--surface); border:1px solid var(--border); border-radius:8px; overflow:hidden; }
+  .curl-sec-toggle { padding:9px 14px; font-size:12px; color:var(--muted); cursor:pointer; display:flex; align-items:center; gap:6px; user-select:none; }
+  .curl-sec-toggle:hover { color:var(--text); }
+  .curl-sec-body { padding:12px 14px; border-top:1px solid var(--border); display:none; }
+  .curl-sec-body.open { display:block; }
+  .hdr-row { display:flex; gap:6px; margin-bottom:6px; }
+  .hdr-row input { flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:4px; padding:5px 8px; font-size:12px; }
+  .hdr-row input:focus { outline:none; border-color:var(--accent); }
+  .hdr-del { background:none; border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:3px 8px; cursor:pointer; font-size:12px; }
+  .hdr-del:hover { border-color:var(--red); color:var(--red); }
+  .add-row-btn { background:none; border:1px dashed var(--border); color:var(--muted); border-radius:4px; padding:4px 12px; font-size:11px; cursor:pointer; }
+  .add-row-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .curl-body-ta { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:8px 10px; font-size:12px; font-family:'Consolas',monospace; min-height:90px; resize:vertical; }
+  .curl-body-ta:focus { outline:none; border-color:var(--accent); }
+  .curl-preview { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:8px 12px; font-size:11px; font-family:'Consolas',monospace; color:var(--muted); white-space:pre-wrap; word-break:break-all; }
+  .curl-save-bar { display:flex; gap:8px; }
+  .curl-save-bar input { flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:6px 10px; font-size:12px; }
+  .curl-save-bar input:focus { outline:none; border-color:var(--accent); }
+  .curl-save-btn { background:var(--surface); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:6px 14px; font-size:12px; cursor:pointer; white-space:nowrap; }
+  .curl-save-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .curl-resp-meta { display:flex; gap:12px; font-size:12px; margin-bottom:8px; flex-wrap:wrap; }
+  .curl-resp-ok  { color:var(--green); font-weight:600; }
+  .curl-resp-err { color:var(--red); font-weight:600; }
+  .curl-resp-body { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:12px; font-size:12px; font-family:'Consolas',monospace; color:var(--green); white-space:pre-wrap; max-height:380px; overflow-y:auto; word-break:break-all; }
+  .curl-new-btn { background:none; border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:3px 10px; font-size:11px; cursor:pointer; width:100%; margin-top:4px; }
+  .curl-new-btn:hover { border-color:var(--accent); color:var(--accent); }
+
+  /* ── Shell Mode ── */
+  .mode-toggle { display:flex; gap:2px; background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:2px; width:fit-content; margin-bottom:10px; }
+  .mode-btn { background:none; border:none; color:var(--muted); padding:5px 18px; border-radius:4px; font-size:12px; cursor:pointer; font-weight:500; transition:all .15s; }
+  .mode-btn.active { background:var(--accent); color:#000; font-weight:600; }
+  .shell-cmd-row { display:flex; gap:8px; }
+  .shell-cmd-input { flex:1; background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:7px 10px; font-size:13px; font-family:'Consolas',monospace; }
+  .shell-cmd-input:focus { outline:none; border-color:var(--accent); }
+  .shell-run-btn { background:var(--green); color:#000; border:none; border-radius:6px; padding:7px 18px; font-weight:600; cursor:pointer; font-size:13px; white-space:nowrap; }
+  .shell-run-btn:hover { opacity:.85; }
+  .shell-run-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .shell-history { display:flex; flex-direction:column; gap:2px; margin-top:8px; }
+  .shell-hist-item { font-size:11px; color:var(--muted); cursor:pointer; padding:4px 8px; border-radius:4px; font-family:Consolas,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .shell-hist-item:hover { background:rgba(88,166,255,.08); color:var(--accent); }
+  .shell-resp-stdout { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:12px; font-size:12px; font-family:'Consolas',monospace; color:var(--green); white-space:pre-wrap; max-height:340px; overflow-y:auto; word-break:break-all; }
+  .shell-resp-stderr { background:rgba(248,81,73,.05); border:1px solid rgba(248,81,73,.3); border-radius:6px; padding:12px; font-size:12px; font-family:'Consolas',monospace; color:var(--red); white-space:pre-wrap; max-height:120px; overflow-y:auto; word-break:break-all; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚙ Claw Dashboard</h1>
+  <span>Sub-Web 主控介面 · Claw ↔ Sub-Web 架構</span>
+  <span id="globalStatus" style="margin-left:auto; color:var(--muted)">No node selected</span>
+</header>
+
+<div class="layout">
+  <!-- Left: Node list -->
+  <div class="panel nodes-panel">
+    <div class="panel-title">
+      Nodes
+      <button onclick="refreshAll()">Refresh All</button>
+    </div>
+    <div class="add-node">
+      <input id="newNodeUrl" placeholder="http://192.168.50.140:3000" value="http://192.168.50.140:3000">
+      <button onclick="addNode()">Add</button>
+    </div>
+    <div id="nodeList"></div>
+  </div>
+
+  <!-- Right: Main content -->
+  <div class="panel main-panel">
+    <div class="tabs">
+      <div class="tab active" onclick="switchTab('health')">Health</div>
+      <div class="tab" onclick="switchTab('scripts')">Scripts</div>
+      <div class="tab" onclick="switchTab('curl')">Curl</div>
+      <div class="tab" onclick="switchTab('stream')">Stream</div>
+      <div class="tab" onclick="switchTab('deploy')">Deploy</div>
+    </div>
+    <div class="tab-content">
+
+      <!-- Health Tab -->
+      <div class="tab-pane active" id="tab-health">
+        <div id="healthContent">
+          <div class="empty-state"><div class="icon">🔌</div>Select or add a node on the left</div>
+        </div>
+      </div>
+
+      <!-- Scripts Tab (merged with Execute) -->
+      <div class="tab-pane" id="tab-scripts">
+        <div id="scriptsContent">
+          <div class="empty-state"><div class="icon">📋</div>Select a node to view scripts</div>
+        </div>
+      </div>
+
+      <!-- Curl Tab -->
+      <div class="tab-pane" id="tab-curl">
+        <div id="curlContent"></div>
+      </div>
+
+      <!-- Stream Tab -->
+      <div class="tab-pane" id="tab-stream">
+        <div id="streamContent">
+          <div class="empty-state"><div class="icon">📡</div>Select a node to monitor SSE stream</div>
+        </div>
+      </div>
+
+      <!-- Deploy Tab -->
+      <div class="tab-pane" id="tab-deploy">
+        <div id="deployContent">
+          <div class="empty-state"><div class="icon">🚀</div>Select a node to deploy scripts</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Constants ──────────────────────────────────────────────────────────────
+const AGENT_ID  = 'claw-dashboard';
+const LS_KEYS   = { favorites: 'claw_favorites', shellHistory: 'claw_shell_history' };
+const TAB_NAMES = ['health', 'scripts', 'curl', 'stream', 'deploy'];
+
+// ── State ──────────────────────────────────────────────────────────────────
+const nodes = new Map(); // nodeId → { url, status, health, scripts }
+let activeNodeId = null;
+let activeTab = 'health';
+let sseSource = null;
+
+// Health auto-refresh
+let healthRefreshInterval = 0; // ms; 0 = manual
+let healthRefreshTimer = null;
+let healthLastRefresh = null;
+
+// Script favorites (persisted)
+const favorites = new Set(JSON.parse(localStorage.getItem(LS_KEYS.favorites) || '[]'));
+
+// Shell state
+let shellHistory = JSON.parse(localStorage.getItem(LS_KEYS.shellHistory) || '[]');
+let shellCmd = '';
+
+// ── Utils ──────────────────────────────────────────────────────────────────
+function parseUrl(url) {
+  try { return new URL(url); } catch { return null; }
+}
+
+function genTraceId() {
+  return `${crypto.randomUUID().slice(0,8)}-step-001`;
+}
+
+function formatTime() {
+  return new Date().toLocaleTimeString('zh-TW', { hour12: false });
+}
+
+function toast(msg, color = 'var(--text)') {
+  const toastEl = document.createElement('div');
+  toastEl.className = 'toast';
+  toastEl.style.color = color;
+  toastEl.textContent = msg;
+  document.body.appendChild(toastEl);
+  setTimeout(() => toastEl.remove(), 3000);
+}
+
+async function safeFetch(url, opts = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeout || 8000);
+  try {
+    const res = await fetch(url, { ...opts, signal: controller.signal });
+    clearTimeout(timer);
+    return res;
+  } catch (e) {
+    clearTimeout(timer);
+    throw e;
+  }
+}
+
+// ── Node Management ────────────────────────────────────────────────────────
+async function addNode() {
+  let url = document.getElementById('newNodeUrl').value.trim();
+  if (!url) return;
+  if (!url.startsWith('http')) url = 'http://' + url;
+  url = url.replace(/\/$/, '');
+
+  // Derive a temporary nodeId from host
+  const tmpId = new URL(url).hostname.replace(/\./g, '_') + '_' + Date.now().toString(36);
+  nodes.set(tmpId, { url, status: 'checking', health: null, scripts: [] });
+  renderNodeList();
+  await checkNode(tmpId);
+  selectNode(tmpId);
+}
+
+async function checkNode(nodeId) {
+  const node = nodes.get(nodeId);
+  if (!node) return;
+  node.status = 'checking';
+  renderNodeList();
+  try {
+    const res = await safeFetch(`${node.url}/health`, { timeout: 5000 });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    node.health = data;
+    node.status = 'online';
+    // Use nodeId from response if available
+    if (data.nodeId && data.nodeId !== 'unknown') {
+      const old = nodes.get(nodeId);
+      if (nodeId !== data.nodeId) {
+        nodes.delete(nodeId);
+        nodes.set(data.nodeId, old);
+        if (activeNodeId === nodeId) activeNodeId = data.nodeId;
+        nodeId = data.nodeId;
+      }
+    }
+    // Fetch scripts
+    await fetchScripts(nodeId);
+  } catch (e) {
+    node.status = 'offline';
+    node.health = null;
+    toast(`Node offline: ${e.message}`, 'var(--red)');
+  }
+  renderNodeList();
+  if (activeNodeId === nodeId) renderActiveNode();
+}
+
+async function fetchScripts(nodeId) {
+  const node = nodes.get(nodeId);
+  if (!node) return;
+  try {
+    const res = await safeFetch(`${node.url}/scripts`, { timeout: 5000 });
+    if (!res.ok) {
+      const body = await res.text().catch(() => '');
+      node.scripts = [];
+      node.scriptsError = `HTTP ${res.status}${body.includes('manifest') ? ' — manifest.json 不存在，請確認已上傳至 /opt/hiba/scripts/' : ''}`;
+      return;
+    }
+    const data = await res.json();
+    node.scripts = data.scripts || [];
+    node.scriptsError = null;
+  } catch(e) {
+    node.scripts = [];
+    node.scriptsError = `連線失敗：${e.message}`;
+  }
+}
+
+function selectNode(nodeId) {
+  clearHealthTimer();
+  activeNodeId = nodeId;
+  renderNodeList();
+  renderActiveNode();
+  document.getElementById('globalStatus').textContent =
+    `Active: ${nodeId} · ${nodes.get(nodeId)?.url || ''}`;
+  if (activeTab === 'health' && healthRefreshInterval > 0) startHealthTimer();
+}
+
+async function refreshAll() {
+  for (const id of nodes.keys()) await checkNode(id);
+}
+
+// ── Render Node List ──────────────────────────────────────────────────────
+function renderNodeList() {
+  const container = document.getElementById('nodeList');
+  if (nodes.size === 0) {
+    container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No nodes added</div>';
+    return;
+  }
+  container.innerHTML = [...nodes.entries()].map(([id, node]) => `
+    <div class="node-card ${activeNodeId === id ? 'active' : ''}" onclick="selectNode('${id}')">
+      <div class="node-header">
+        <div class="dot ${node.status}"></div>
+        <span class="node-id">${id}</span>
+      </div>
+      <div class="node-url">${node.url}</div>
+      <div class="node-meta">
+        <span>${node.status === 'online' ? '● Online' : node.status === 'offline' ? '○ Offline' : '◌ Checking...'}</span>
+        ${node.scripts.length ? `<span>${node.scripts.length} scripts</span>` : ''}
+        ${node.health?.uptime != null ? `<span>up ${formatUptime(node.health.uptime)}</span>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+function formatUptime(s) {
+  if (s < 60) return `${Math.round(s)}s`;
+  if (s < 3600) return `${Math.round(s/60)}m`;
+  return `${Math.round(s/3600)}h`;
+}
+
+// ── Tab Switch ────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  if (activeTab === 'health' && tab !== 'health') clearHealthTimer();
+  activeTab = tab;
+  document.querySelectorAll('.tab').forEach((el, i) => {
+    el.classList.toggle('active', TAB_NAMES[i] === tab);
+  });
+  document.querySelectorAll('.tab-pane').forEach(el => el.classList.remove('active'));
+  document.getElementById(`tab-${tab}`).classList.add('active');
+  if (tab === 'health' && healthRefreshInterval > 0 && activeNodeId) startHealthTimer();
+  if (activeNodeId) renderActiveNode();
+  if (tab === 'curl' && !activeNodeId) renderCurl();
+}
+
+function renderActiveNode() {
+  if (!activeNodeId) return;
+  switch(activeTab) {
+    case 'health':   renderHealth(); break;
+    case 'scripts':  renderScripts(); break;
+    case 'curl':     renderCurl(); break;
+    case 'stream':   renderStream(); break;
+    case 'deploy':   renderDeploy(); break;
+  }
+}
+
+// ── Health Refresh Timer ──────────────────────────────────────────────────
+function startHealthTimer() {
+  clearHealthTimer();
+  healthRefreshTimer = setInterval(async () => {
+    if (activeNodeId && activeTab === 'health') {
+      await checkNode(activeNodeId);
+      healthLastRefresh = new Date();
+      renderHealthRefreshBar();
+    }
+  }, healthRefreshInterval);
+}
+
+function clearHealthTimer() {
+  if (healthRefreshTimer) { clearInterval(healthRefreshTimer); healthRefreshTimer = null; }
+}
+
+function setHealthRefresh(ms) {
+  healthRefreshInterval = ms;
+  clearHealthTimer();
+  if (ms > 0 && activeNodeId && activeTab === 'health') startHealthTimer();
+  renderHealthRefreshBar();
+}
+
+function renderHealthRefreshBar() {
+  const bar = document.getElementById('healthRefreshBar');
+  if (!bar) return;
+  const intervals = [0, 5000, 10000, 30000, 60000];
+  const labels    = ['Manual', '5s', '10s', '30s', '60s'];
+  const lastStr   = healthLastRefresh
+    ? healthLastRefresh.toLocaleTimeString('zh-TW', { hour12: false })
+    : '—';
+  bar.innerHTML =
+    `<span>Auto-refresh:</span>` +
+    intervals.map((ms, i) =>
+      `<button class="refresh-btn ${healthRefreshInterval === ms ? 'active' : ''}"
+        onclick="setHealthRefresh(${ms})">${labels[i]}</button>`
+    ).join('') +
+    `<span style="margin-left:auto;font-size:11px">Last: ${lastStr}</span>`;
+}
+
+// ── Health Tab ────────────────────────────────────────────────────────────
+function buildHealthCards(health, node) {
+  const urlObj = parseUrl(node.url);
+  const hostPart = urlObj ? urlObj.hostname : node.url;
+  const portPart = urlObj ? urlObj.port || '80' : '—';
+  const scriptCount = node.scripts.length || health.scripts?.length || 0;
+  const auditOk = health.auditDb === 'ready';
+  const lastCheckedStr = healthLastRefresh
+    ? healthLastRefresh.toLocaleTimeString('zh-TW', { hour12: false })
+    : '—';
+  return `
+    <div class="health-grid">
+      <div class="health-card ok">
+        <div class="label">Status</div>
+        <div class="value" style="color:var(--green)">${health.status || 'online'}</div>
+      </div>
+      <div class="health-card info">
+        <div class="label">Node ID</div>
+        <div class="value sm">${health.nodeId || '—'}</div>
+      </div>
+      <div class="health-card info">
+        <div class="label">Uptime</div>
+        <div class="value">${health.uptime != null ? formatUptime(health.uptime) : '—'}</div>
+      </div>
+      <div class="health-card info">
+        <div class="label">Scripts Loaded</div>
+        <div class="value">${scriptCount}</div>
+      </div>
+      <div class="health-card ${auditOk ? 'ok' : 'warn'}">
+        <div class="label">Audit DB</div>
+        <div class="value sm" style="color:${auditOk ? 'var(--green)' : 'var(--amber)'}">${health.auditDb || '—'}</div>
+      </div>
+      <div class="health-card info">
+        <div class="label">Host</div>
+        <div class="value sm">${hostPart}</div>
+      </div>
+      <div class="health-card info">
+        <div class="label">Port</div>
+        <div class="value">${portPart}</div>
+      </div>
+      <div class="health-card info">
+        <div class="label">Last Checked</div>
+        <div class="value sm">${lastCheckedStr}</div>
+      </div>
+    </div>`;
+}
+
+function renderHealth() {
+  const node = nodes.get(activeNodeId);
+  const container = document.getElementById('healthContent');
+  if (!node) return;
+
+  healthLastRefresh = new Date();
+  const refreshBar = `<div class="refresh-bar" id="healthRefreshBar"></div>`;
+  const health = node.health;
+
+  if (!health) {
+    container.innerHTML = `
+      ${refreshBar}
+      <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center">
+        <div class="dot ${node.status}"></div>
+        <span style="font-size:15px;font-weight:600">${activeNodeId}</span>
+        <span style="color:var(--muted)">${node.url}</span>
+        <button onclick="checkNode('${activeNodeId}')" style="margin-left:auto;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 14px;cursor:pointer">Re-check</button>
+      </div>
+      <div style="color:var(--red);padding:20px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+        Node is offline or unreachable.<br>
+        <span style="font-size:12px;color:var(--muted)">URL: ${node.url}/health</span>
+      </div>`;
+    renderHealthRefreshBar();
+    return;
+  }
+
+  container.innerHTML = `
+    ${refreshBar}
+    <div style="margin-bottom:16px;display:flex;gap:10px;align-items:center">
+      <div class="dot online"></div>
+      <span style="font-size:15px;font-weight:600;color:var(--text-bright)">${health.nodeId || activeNodeId}</span>
+      <span style="color:var(--muted);font-size:12px;font-family:Consolas">${node.url}</span>
+      <button onclick="checkNode('${activeNodeId}').then(()=>{healthLastRefresh=new Date();renderHealthRefreshBar()})"
+        style="margin-left:auto;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 14px;cursor:pointer;font-size:12px">↺ Refresh</button>
+    </div>
+    ${buildHealthCards(health, node)}
+    <div class="health-raw">
+      <div class="label">GET ${node.url}/health — raw response</div>
+      <pre>${JSON.stringify(health, null, 2)}</pre>
+    </div>`;
+  renderHealthRefreshBar();
+}
+
+// ── Script Card Helpers ───────────────────────────────────────────────────
+function buildSchemaTable(s) {
+  const inputRows = Object.entries(s.inputSchema || {}).map(([key, meta]) => `
+    <tr>
+      <td style="color:var(--text);font-weight:500">${key}${meta.required ? '<span style="color:var(--red)">*</span>' : ''}</td>
+      <td style="color:var(--purple)">${meta.type}</td>
+      <td style="color:var(--muted)">${meta.description || '—'}</td>
+    </tr>`).join('');
+  const outputRows = Object.entries(s.outputSchema || {}).map(([key, meta]) => `
+    <tr>
+      <td style="color:var(--text)">${key}</td>
+      <td style="color:var(--purple)">${meta.type || '—'}</td>
+      <td style="color:var(--muted)">${meta.description || (meta.enum ? meta.enum.join(' / ') : '—')}</td>
+    </tr>`).join('');
+  if (!inputRows && !outputRows) return '';
+  return `
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+      ${inputRows ? `<div>
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px">Input Schema</div>
+        <table style="font-size:11px"><tbody>${inputRows}</tbody></table>
+      </div>` : ''}
+      ${outputRows ? `<div>
+        <div style="font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px">Output Schema</div>
+        <table style="font-size:11px"><tbody>${outputRows}</tbody></table>
+      </div>` : ''}
+    </div>`;
+}
+
+function buildParamFields(s, uid) {
+  return Object.entries(s.inputSchema || {}).map(([key, meta]) => `
+    <div class="form-field" style="margin-bottom:8px">
+      <label>${key}${meta.required ? '<span style="color:var(--red)">*</span>' : ''}
+        <span style="color:var(--purple)">${meta.type}</span>
+        ${meta.description ? `<span style="color:var(--muted)"> — ${meta.description}</span>` : ''}
+      </label>
+      <input id="sp_${uid}_${key}" type="${meta.type === 'number' ? 'number' : 'text'}"
+        placeholder="${meta.description || key}"
+        style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px 10px;font-size:13px">
+    </div>`).join('');
+}
+
+// ── Scripts Tab ───────────────────────────────────────────────────────────
+async function renderScripts() {
+  const node = nodes.get(activeNodeId);
+  const el = document.getElementById('scriptsContent');
+  if (!node) {
+    el.innerHTML = `<div class="empty-state"><div class="icon">📋</div>Select a node first</div>`;
+    return;
+  }
+
+  // 每次進入 Scripts tab 都重新抓取
+  el.innerHTML = `<div style="padding:20px;color:var(--muted);font-size:13px"><span class="spinner"></span> 載入腳本清單...</div>`;
+  await fetchScripts(activeNodeId);
+
+  const refreshBtn = `<button onclick="renderScripts()" style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;cursor:pointer;font-size:12px">↺ Refresh</button>`;
+
+  // 顯示錯誤
+  if (node.scriptsError) {
+    el.innerHTML = `
+      <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+        <span style="color:var(--muted);font-size:12px"><strong style="color:var(--text)">${activeNodeId}</strong></span>
+        ${refreshBtn}
+      </div>
+      <div style="background:rgba(248,81,73,.1);border:1px solid rgba(248,81,73,.3);border-radius:8px;padding:16px;color:var(--red);font-size:13px">
+        <div style="font-weight:600;margin-bottom:6px">✗ 無法取得腳本清單</div>
+        <div style="color:var(--muted)">${node.scriptsError}</div>
+        <div style="margin-top:12px;font-size:12px;color:var(--muted)">
+          排查步驟：<br>
+          1. 確認 <code style="color:var(--yellow)">/opt/hiba/scripts/manifest.json</code> 存在<br>
+          2. 確認 <code style="color:var(--yellow)">hiba-subweb</code> 服務正在運作：<code style="color:var(--yellow)">systemctl status hiba-subweb</code>
+        </div>
+      </div>`;
+    return;
+  }
+
+  if (!node.scripts.length) {
+    el.innerHTML = `
+      <div style="margin-bottom:12px;display:flex;align-items:center;justify-content:space-between">
+        <span style="color:var(--muted);font-size:12px"><strong style="color:var(--text)">${activeNodeId}</strong></span>
+        ${refreshBtn}
+      </div>
+      <div class="empty-state"><div class="icon">📋</div>No scripts found<div style="font-size:12px;margin-top:8px">manifest.json 可能是空的，或腳本尚未部署</div></div>`;
+    return;
+  }
+
+  const favScripts  = node.scripts.filter(s => favorites.has(s.name));
+  const restScripts = node.scripts.filter(s => !favorites.has(s.name));
+
+  const favSection = favScripts.length ? `
+    <div class="section-label">⭐ 標記常用 <span style="color:var(--yellow);font-size:11px">${favScripts.length}</span></div>
+    <div class="script-list" style="margin-bottom:16px">
+      ${favScripts.map(s => buildScriptCard(s, activeNodeId)).join('')}
+    </div>` : '';
+
+  el.innerHTML = `
+    <div style="margin-bottom:14px;display:flex;align-items:center;justify-content:space-between">
+      <span style="color:var(--muted);font-size:12px">${node.scripts.length} scripts on <strong style="color:var(--text)">${activeNodeId}</strong></span>
+      ${refreshBtn}
+    </div>
+    ${favSection}
+    ${restScripts.length ? `<div class="section-label">所有腳本</div>` : ''}
+    <div class="script-list">
+      ${restScripts.map(s => buildScriptCard(s, activeNodeId)).join('')}
+    </div>`;
+}
+
+function buildScriptCard(s, nodeId) {
+  const isFav  = favorites.has(s.name);
+  const cardId = `body_${nodeId}_${s.name}`;
+  const uid    = `${nodeId}_${s.name}`;
+  const paramFields = buildParamFields(s, uid);
+  return `
+    <div class="script-item">
+      <div class="script-header" onclick="toggleScript('${cardId}')">
+        <button class="fav-star ${isFav ? 'active' : ''}"
+          title="${isFav ? '取消最愛' : '加入最愛'}"
+          onclick="event.stopPropagation();toggleFavorite('${s.name}')">${isFav ? '★' : '☆'}</button>
+        <span class="script-name">${s.name}</span>
+        <span class="script-desc">${s.description || ''}</span>
+        <span class="badge ${s.renderHint || 'text'}">${s.renderHint || 'text'}</span>
+        ${s.timeout ? `<span style="font-size:10px;color:var(--muted)">${s.timeout/1000}s</span>` : ''}
+      </div>
+      <div class="script-body" id="${cardId}">
+        ${buildSchemaTable(s)}
+        <div style="border-top:1px solid var(--border);margin:0 -16px 14px;"></div>
+        ${paramFields || '<p style="color:var(--muted);font-size:12px;margin-bottom:10px">No parameters required</p>'}
+        ${buildAttachWidget(`att_${uid}`)}
+        <button class="run-btn" id="runbtn_${uid}" onclick="runScriptInline('${nodeId}','${s.name}')">▶ Execute</button>
+        <div id="sresult_${uid}"></div>
+      </div>
+    </div>`;
+}
+
+function toggleFavorite(scriptName) {
+  if (favorites.has(scriptName)) favorites.delete(scriptName);
+  else favorites.add(scriptName);
+  localStorage.setItem(LS_KEYS.favorites, JSON.stringify([...favorites]));
+  if (activeTab === 'scripts' && activeNodeId) renderScripts();
+}
+
+async function runScriptInline(nodeId, scriptName) {
+  const node = nodes.get(nodeId);
+  const s = node?.scripts.find(x => x.name === scriptName);
+  if (!node || !s) return;
+  const uid = `${nodeId}_${scriptName}`;
+  const btn = document.getElementById(`runbtn_${uid}`);
+  const resultEl = document.getElementById(`sresult_${uid}`);
+
+  const params = {};
+  for (const [key, meta] of Object.entries(s.inputSchema || {})) {
+    const val = document.getElementById(`sp_${uid}_${key}`)?.value.trim() || '';
+    params[key] = meta.type === 'number' ? Number(val) : val;
+  }
+  const attachment = getAttachmentData(`att_${uid}`);
+  if (attachment) params._attachment = { name: attachment.name, content: attachment.content };
+
+  const traceId = genTraceId();
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Running...'; }
+  if (resultEl) resultEl.innerHTML = '';
+
+  const t0 = Date.now();
+  try {
+    const res = await safeFetch(`${node.url}/execute`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Trace-Id': traceId, 'X-Agent-Id': AGENT_ID, 'X-Depth': '1' },
+      body: JSON.stringify({ scriptName, params }),
+      timeout: 35000,
+    });
+    const data = await res.json();
+    renderResult(resultEl, data, Date.now() - t0, traceId, s.renderHint);
+  } catch (e) {
+    if (resultEl) resultEl.innerHTML = `<div class="result-box"><div style="color:var(--red)">${e.message}</div></div>`;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '▶ Execute'; }
+}
+
+function toggleScript(id) {
+  document.getElementById(id)?.classList.toggle('open');
+}
+
+function renderResult(el, data, ms, traceId, hint) {
+  const renderHint = data.renderHint || hint || 'text';
+  let body = '';
+
+  if (!data.success) {
+    body = `<div style="color:var(--red);background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:12px">${data.error || JSON.stringify(data)}</div>`;
+  } else {
+    switch(renderHint) {
+      case 'table':
+        body = renderTable(data.output); break;
+      case 'status':
+        body = renderStatus(data.output); break;
+      case 'chart':
+        body = renderChart(data.output); break;
+      default:
+        body = `<pre style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:12px;font-size:12px;color:var(--green);white-space:pre-wrap">${JSON.stringify(data.output ?? data, null, 2)}</pre>`;
+    }
+  }
+
+  el.innerHTML = `<div class="result-box ${data.success ? 'ok' : 'err'}">
+    <div class="result-meta">
+      <span class="${data.success ? 'result-success' : 'result-error'}">${data.success ? '✓ Success' : '✗ Failed'}</span>
+     <span>${ms}ms</span>
+      <span>${data.executedAt ? new Date(data.executedAt).toLocaleTimeString('zh-TW', {hour12:false}) : ''}</span>
+      ${data.auditHash ? `<span style="color:var(--purple)">hash: ${data.auditHash.slice(0,12)}…</span>` : ''}
+      <span style="margin-left:auto;color:var(--muted)">trace: ${traceId}</span>
+    </div>
+    ${body}
+  </div>`;
+}
+
+function renderTable(output) {
+  if (!output || typeof output !== 'object') return `<pre>${JSON.stringify(output)}</pre>`;
+  const rows = Array.isArray(output) ? output : [output];
+  const keys = [...new Set(rows.flatMap(r => Object.keys(r)))];
+  return `<table>
+    <thead><tr>${keys.map(k => `<th>${k}</th>`).join('')}</tr></thead>
+    <tbody>${rows.map(r => `<tr>${keys.map(k => `<td>${r[k] ?? '—'}</td>`).join('')}</tr>`).join('')}</tbody>
+  </table>`;
+}
+
+function renderStatus(output) {
+  if (!output) return '<div style="color:var(--muted)">No output</div>';
+  const statusColor = output.status === 'running' ? 'var(--green)' : output.status === 'error' ? 'var(--red)' : 'var(--yellow)';
+  return `<div style="display:flex;flex-direction:column;gap:10px">
+    <div class="status-light">
+      <div class="dot" style="background:${statusColor};box-shadow:0 0 8px ${statusColor}"></div>
+      <span style="color:${statusColor}">${output.status || (output.success ? 'OK' : 'FAIL')}</span>
+    </div>
+    ${output.oee != null ? `<div style="font-size:13px">OEE: <strong style="color:var(--accent)">${output.oee}%</strong></div>` : ''}
+    ${output.alarms?.length ? `<div style="color:var(--red);font-size:12px">Alarms: ${output.alarms.join(', ')}</div>` : ''}
+    <pre style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;color:var(--muted)">${JSON.stringify(output, null, 2)}</pre>
+  </div>`;
+}
+
+function renderChart(output) {
+  if (!output) return '';
+  const entries = Object.entries(output).filter(([, v]) => typeof v === 'number');
+  const max = Math.max(...entries.map(([, v]) => v), 1);
+  const bars = entries.map(([k, v]) => `
+    <div class="bar-row">
+      <span class="bar-label">${k}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${Math.round(v/max*100)}%"></div></div>
+      <span class="bar-val">${v}</span>
+    </div>`).join('');
+  return `<div class="chart-bar-wrap">${bars}</div>
+    <pre style="margin-top:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px;font-size:11px;color:var(--muted)">${JSON.stringify(output, null, 2)}</pre>`;
+}
+
+// ── Curl Tab ──────────────────────────────────────────────────────────────
+function renderCurl() {
+  const el = document.getElementById('curlContent');
+  if (!el) return;
+
+  el.innerHTML = `
+    <div style="max-width:860px">
+      <div class="curl-section">
+        <div class="curl-sec-body open" style="display:block">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:10px">
+            Target: <strong style="color:var(--accent)">${activeNodeId ? (nodes.get(activeNodeId)?.url || '—') : '（請先在左側選擇節點）'}</strong>
+            <span style="margin-left:6px;opacity:.5">→ POST /cmd</span>
+          </div>
+          <div class="shell-cmd-row">
+            <input class="shell-cmd-input" id="shellCmdInput"
+              placeholder="ls -la /opt/hiba/scripts/"
+              value="${escHtml(shellCmd)}"
+              oninput="shellCmd=this.value"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();runShellCmd()}">
+            <button class="shell-run-btn" id="shellRunBtn" onclick="runShellCmd()">▶ Run</button>
+          </div>
+          ${shellHistory.length ? `
+          <div style="margin-top:10px">
+            <div style="font-size:10px;color:var(--muted);letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px">History</div>
+            <div class="shell-history">
+              ${shellHistory.slice(0,10).map(c=>`<div class="shell-hist-item" onclick="shellCmd=${JSON.stringify(c)};document.getElementById('shellCmdInput').value=${JSON.stringify(c)}">$ ${escHtml(c)}</div>`).join('')}
+            </div>
+          </div>` : ''}
+        </div>
+      </div>
+
+      <div id="shellRespArea" style="display:none;margin-top:14px">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:6px">Output</div>
+        <div class="curl-resp-meta" id="shellRespMeta"></div>
+        <div class="shell-resp-stdout" id="shellRespStdout"></div>
+        <div id="shellRespStderrWrap" style="display:none;margin-top:8px">
+          <div style="font-size:10px;color:var(--red);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">stderr</div>
+          <div class="shell-resp-stderr" id="shellRespStderr"></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+async function displayShellResponse(respArea, res, cmd, ms) {
+  if (respArea) respArea.style.display = 'block';
+  const ct = res.headers.get('content-type') || '';
+
+  if (!ct.includes('application/json')) {
+    const raw = await res.text();
+    document.getElementById('shellRespMeta').innerHTML =
+      `<span class="curl-resp-err">${res.status} ${res.statusText}</span>
+       <span>${ms}ms</span>
+       <span style="color:var(--muted)">${ct || 'text/plain'}</span>`;
+    document.getElementById('shellRespStdout').textContent =
+      res.status === 404
+        ? `[404] /cmd 端點不存在\n\n請確認 Pi 伺服器已部署最新版 sub_web_server.js\n\nRaw: ${raw.slice(0, 400)}`
+        : raw.slice(0, 2000);
+    document.getElementById('shellRespStderrWrap').style.display = 'none';
+    return;
+  }
+
+  const data = await res.json();
+  const exitOk = data.exitCode === 0;
+  document.getElementById('shellRespMeta').innerHTML =
+    `<span class="${exitOk ? 'curl-resp-ok' : 'curl-resp-err'}">${exitOk ? '✓' : '✗'} exit ${data.exitCode ?? '?'}</span>
+     <span>${ms}ms</span>
+     <span style="color:var(--muted);font-family:Consolas;font-size:11px">$ ${escHtml(cmd)}</span>`;
+  document.getElementById('shellRespStdout').textContent = data.stdout || '（無輸出）';
+  const stderrWrap = document.getElementById('shellRespStderrWrap');
+  if (data.stderr) {
+    stderrWrap.style.display = 'block';
+    document.getElementById('shellRespStderr').textContent = data.stderr;
+  } else {
+    stderrWrap.style.display = 'none';
+  }
+}
+
+async function runShellCmd() {
+  const input   = document.getElementById('shellCmdInput');
+  const cmd     = (input?.value || shellCmd).trim();
+  if (!cmd) { toast('請輸入指令', 'var(--yellow)'); return; }
+
+  const nodeUrl = activeNodeId ? nodes.get(activeNodeId)?.url : null;
+  if (!nodeUrl) { toast('請先選擇節點', 'var(--yellow)'); return; }
+
+  shellCmd = cmd;
+  shellHistory = [cmd, ...shellHistory.filter(c => c !== cmd)].slice(0, 20);
+  localStorage.setItem(LS_KEYS.shellHistory, JSON.stringify(shellHistory));
+
+  const btn      = document.getElementById('shellRunBtn');
+  const respArea = document.getElementById('shellRespArea');
+  if (btn)      { btn.disabled = true; btn.textContent = '⏳ Running...'; }
+  if (respArea) { respArea.style.display = 'none'; }
+
+  const t0 = Date.now();
+  try {
+    const res = await safeFetch(`${nodeUrl}/cmd`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ command: cmd }),
+    });
+    await displayShellResponse(respArea, res, cmd, Date.now() - t0);
+  } catch (e) {
+    if (respArea) respArea.style.display = 'block';
+    document.getElementById('shellRespMeta').innerHTML = `<span class="curl-resp-err">Network Error</span>`;
+    document.getElementById('shellRespStdout').textContent = e.message;
+  }
+  if (btn) { btn.disabled = false; btn.textContent = '▶ Run'; }
+}
+
+
+// ── Stream Tab ────────────────────────────────────────────────────────────
+function renderStream() {
+  const node = nodes.get(activeNodeId);
+  const el = document.getElementById('streamContent');
+  if (!node) return;
+
+  el.innerHTML = `
+    <div style="margin-bottom:12px;display:flex;align-items:center;gap:12px">
+      <strong style="font-size:13px;color:var(--text-bright)">SSE 事件流監控</strong>
+      <span style="color:var(--muted);font-size:11px;font-family:Consolas">GET ${node.url}/status/stream</span>
+    </div>
+    <div class="stream-ctrl">
+      <button onclick="startStream('${activeNodeId}')">▶ Connect</button>
+      <button class="stop" onclick="stopStream()">■ Disconnect</button>
+      <button onclick="clearStreamLog()">Clear</button>
+      <span id="streamStatus" style="font-size:12px;color:var(--muted);margin-left:auto">Disconnected</span>
+    </div>
+    <div class="stream-log" id="streamLog">
+      <div class="stream-log-header">
+        <span>Time</span>
+        <span>Event</span>
+        <span>Agent</span>
+        <span>Tool</span>
+        <span>Trace ID</span>
+        <span>Hash</span>
+      </div>
+    </div>`;
+}
+
+function startStream(nodeId) {
+  stopStream();
+  const node = nodes.get(nodeId);
+  if (!node) return;
+
+  document.getElementById('streamStatus').textContent = 'Connecting...';
+  document.getElementById('streamStatus').style.color = 'var(--yellow)';
+
+  sseSource = new EventSource(`${node.url}/status/stream`);
+
+  sseSource.onopen = () => {
+    logStream('open', 'Connected', 'var(--green)');
+    document.getElementById('streamStatus').textContent = 'Connected';
+    document.getElementById('streamStatus').style.color = 'var(--green)';
+  };
+
+  sseSource.addEventListener('progress', (e) => {
+    logStream('progress', e.data);
+  });
+  sseSource.addEventListener('done', (e) => {
+    logStream('done', e.data, 'var(--green)');
+  });
+  sseSource.addEventListener('error', (e) => {
+    logStream('error', JSON.stringify(e.data || 'stream error'), 'var(--red)');
+  });
+
+  sseSource.onmessage = (e) => {
+    logStream('message', e.data);
+  };
+
+  sseSource.onerror = () => {
+    document.getElementById('streamStatus').textContent = 'Error / Reconnecting...';
+    document.getElementById('streamStatus').style.color = 'var(--red)';
+    logStream('error', 'Connection error or node closed stream', 'var(--red)');
+  };
+}
+
+function stopStream() {
+  if (sseSource) { sseSource.close(); sseSource = null; }
+  const s = document.getElementById('streamStatus');
+  if (s) { s.textContent = 'Disconnected'; s.style.color = 'var(--muted)'; }
+  logStream('closed', { toolName: '—', agentId: '—', traceId: '—' });
+}
+
+function parseStreamPayload(data) {
+  if (typeof data === 'string') {
+    try { return JSON.parse(data); } catch { return null; }
+  }
+  return typeof data === 'object' ? data : null;
+}
+
+function logStream(evt, data, color) {
+  const log = document.getElementById('streamLog');
+  if (!log) return;
+  const parsed = parseStreamPayload(data);
+  const evtClass = evt === 'open' || evt === 'done' ? 'open-evt'
+    : evt === 'error' ? 'err-evt'
+    : 'raw-evt';
+
+  const agentVal = parsed?.agentId ?? parsed?.agent_id ?? '—';
+  const toolVal  = parsed?.toolName ?? parsed?.tool ?? parsed?.tool_name ?? '—';
+  const traceVal = parsed?.traceId ?? parsed?.trace_id ?? '—';
+  const hashVal  = parsed?.auditHash ?? parsed?.audit_hash ?? parsed?.hash ?? '—';
+
+  const entry = document.createElement('div');
+  entry.className = `entry ${evtClass}`;
+  entry.title = typeof data === 'string' ? data : JSON.stringify(data);
+  entry.innerHTML = `
+    <span class="s-ts">${formatTime()}</span>
+    <span class="s-evt">${evt}</span>
+    <span class="s-agent">${escHtml(String(agentVal))}</span>
+    <span class="s-tool">${escHtml(String(toolVal))}</span>
+    <span class="s-trace">${escHtml(String(traceVal))}</span>
+    <span class="s-hash">${escHtml(String(hashVal).slice(0, 16))}${hashVal !== '—' ? '…' : ''}</span>`;
+  log.appendChild(entry);
+  log.scrollTop = log.scrollHeight;
+}
+
+function clearStreamLog() {
+  const log = document.getElementById('streamLog');
+  if (log) log.innerHTML = '';
+}
+
+
+// ── Deploy Tab ────────────────────────────────────────────────────────────
+let deployMode = 'script'; // 'script' | 'file'
+let deployFileContent = null;
+let deployFileName = null;   // for script mode: scriptName without .py; for file mode: full filename
+let deployHistory = [];      // { nodeId, type, name, size, ts, success }
+let deployTargetDir = 'data'; // 'scripts' | 'data' | 'subweb'，由副檔名自動預選或手動變更
+
+const DEPLOY_FILE_ACCEPT = '.json,.txt,.csv,.tsv,.log,.md,.yaml,.yml,.conf,.ini,.js,.py,.sh';
+const DEPLOY_FILE_MAX    = 2 * 1024 * 1024; // 2 MB
+
+function setDeployMode(mode) {
+  deployMode = mode;
+  deployFileContent = null;
+  deployFileName = null;
+  deployTargetDir = 'data'; // reset to default when switching mode
+  renderDeploy();
+}
+
+function renderDeploy() {
+  const node = nodes.get(activeNodeId);
+  const el = document.getElementById('deployContent');
+  if (!node) { el.innerHTML = '<div class="empty-state"><div class="icon">🚀</div>Select a node to deploy</div>'; return; }
+  if (node.status !== 'online') {
+    el.innerHTML = `<div class="deploy-form"><div style="color:var(--red)">⚠ Node is offline. Cannot deploy.</div></div>`;
+    return;
+  }
+
+  const isScript = deployMode === 'script';
+  const accept   = isScript ? '.py' : DEPLOY_FILE_ACCEPT;
+  const dropHint = isScript ? '.py 腳本' : DEPLOY_FILE_ACCEPT.replace(/\./g,'').replace(/,/g,' / ');
+  const dropText = deployFileContent
+    ? `✓ ${deployFileName}${isScript ? '.py' : ''} (${(deployFileContent.length/1024).toFixed(1)} KB)`
+    : `拖曳${isScript ? ' .py 腳本' : '文件'}到此，或點擊選擇`;
+  const dropColor = deployFileContent ? 'var(--green)' : '';
+
+  const metaFields = isScript ? `
+    <div class="deploy-meta">
+      <div>
+        <label>腳本名稱 (scriptName) <span style="color:var(--red)">*</span></label>
+        <input id="deployScriptName" placeholder="e.g. script_4" value="${deployFileName || ''}"
+          oninput="this.value=this.value.replace(/[^a-zA-Z0-9_]/g,'_').replace(/^_+/,'')">
+      </div>
+      <div>
+        <label>說明 (description)</label>
+        <input id="deployDesc" placeholder="腳本功能說明">
+      </div>
+    </div>` : `
+    <div class="deploy-meta">
+      <div>
+        <label>存放名稱 <span style="color:var(--red)">*</span></label>
+        <input id="deployFileName" placeholder="e.g. data_orders.json" value="${deployFileName || ''}"
+          oninput="deployFileName=this.value">
+      </div>
+      <div>
+        <label>目標目錄</label>
+        <select id="deployTargetDir" onchange="deployTargetDir=this.value">
+          <option value="scripts" ${deployTargetDir==='scripts'?'selected':''}>scripts/ （與腳本同層）</option>
+          <option value="data"    ${deployTargetDir==='data'   ?'selected':''}>data/ （獨立資料目錄）</option>
+          <option value="subweb"  ${deployTargetDir==='subweb' ?'selected':''}>subweb/ （Sub-Web 伺服器目錄）</option>
+        </select>
+      </div>
+    </div>`;
+
+  const previewHtml = deployFileContent ? `
+    <div style="font-size:11px;color:var(--muted);margin-bottom:6px">Preview (first 20 lines)</div>
+    <div class="deploy-preview">${escHtml(deployFileContent.split('\n').slice(0,20).join('\n'))}${deployFileContent.split('\n').length>20?'\n...':''}</div>` : '';
+
+  const historyHtml = deployHistory.filter(h=>h.nodeId===activeNodeId).slice().reverse().slice(0,8).map(h=>`
+    <div class="history-item">
+      <div>
+        <div class="hi-name">${h.type==='script'?'⚙':'📄'} ${h.name}</div>
+        <div class="hi-meta">${h.ts} · ${h.size} bytes · ${h.success?'<span style="color:var(--green)">success</span>':'<span style="color:var(--red)">failed</span>'}</div>
+      </div>
+      <button class="hi-del" onclick="removeDeployItem('${h.name}','${h.type}')">Remove</button>
+    </div>`).join('');
+
+  el.innerHTML = `
+    <div class="deploy-form">
+      <h3>
+        Deploy · ${activeNodeId}
+        <div class="deploy-mode-toggle">
+          <button class="deploy-mode-btn ${isScript?'active':''}" onclick="setDeployMode('script')">⚙ Script</button>
+          <button class="deploy-mode-btn ${!isScript?'active':''}" onclick="setDeployMode('file')">📄 File</button>
+        </div>
+      </h3>
+
+      <div class="deploy-drop" id="deployDrop"
+        onclick="document.getElementById('deployFileInput').click()"
+        ondragover="event.preventDefault();this.classList.add('drag-over')"
+        ondragleave="this.classList.remove('drag-over')"
+        ondrop="handleFileDrop(event)">
+        <div id="dropLabel" style="color:${dropColor}">${dropText}</div>
+        <div class="drop-hint">${deployFileContent ? '重新拖曳或點擊可替換' : dropHint}</div>
+      </div>
+      <input type="file" id="deployFileInput" accept="${accept}" style="display:none"
+        onchange="handleFileSelect(this)">
+
+      ${previewHtml}
+      ${metaFields}
+      <div class="deploy-overwrite">
+        <input type="checkbox" id="deployOverwrite" style="width:14px;height:14px">
+        <label for="deployOverwrite">允許覆蓋已存在的${isScript?'腳本':'檔案'}</label>
+      </div>
+      <button class="deploy-btn" id="deployBtn" onclick="runDeploy()" ${deployFileContent?'':'disabled'}>
+        推送至 ${activeNodeId}
+      </button>
+      <div id="deployResult"></div>
+    </div>
+    ${historyHtml ? `<div class="deploy-history" style="max-width:680px"><h4>最近部署記錄</h4>${historyHtml}</div>` : ''}`;
+}
+
+function escHtml(s) {
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function handleFileSelect(input) {
+  const file = input.files[0];
+  if (!file) return;
+  loadDeployFile(file);
+  input.value = ''; // allow re-selecting same file
+}
+
+function handleFileDrop(event) {
+  event.preventDefault();
+  document.getElementById('deployDrop')?.classList.remove('drag-over');
+  const file = event.dataTransfer.files[0];
+  if (!file) return;
+  if (deployMode === 'script' && !file.name.endsWith('.py')) {
+    toast('Script 模式只接受 .py 檔案', 'var(--red)'); return;
+  }
+  loadDeployFile(file);
+}
+
+function loadDeployFile(file) {
+  const maxBytes = deployMode === 'script' ? 512*1024 : DEPLOY_FILE_MAX;
+  if (file.size > maxBytes) {
+    toast(`檔案過大 (${(file.size/1024).toFixed(0)} KB)，上限 ${maxBytes/1024} KB`, 'var(--red)');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = e => {
+    deployFileContent = e.target.result;
+    deployFileName = deployMode === 'script'
+      ? file.name.replace(/\.py$/, '')
+      : file.name;
+    // 依副檔名自動預選 targetDir（File 模式才套用）
+    if (deployMode === 'file') {
+      if (/\.(js|sh)$/i.test(file.name)) {
+        deployTargetDir = 'subweb';
+      } else if (/\.(py)$/i.test(file.name)) {
+        deployTargetDir = 'scripts';
+      } else {
+        deployTargetDir = 'data';
+      }
+    }
+    renderDeploy();
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+async function runDeploy() {
+  const node = nodes.get(activeNodeId);
+  if (!deployFileContent) { toast('請先選擇檔案', 'var(--yellow)'); return; }
+
+  const overwrite = document.getElementById('deployOverwrite')?.checked ?? false;
+  const traceId   = genTraceId();
+  const btn       = document.getElementById('deployBtn');
+  const resultEl  = document.getElementById('deployResult');
+
+  let payload, displayName;
+
+  if (deployMode === 'script') {
+    const scriptName = document.getElementById('deployScriptName')?.value.trim();
+    if (!scriptName) { toast('請填入腳本名稱', 'var(--yellow)'); return; }
+    const description = document.getElementById('deployDesc')?.value.trim();
+    displayName = `${scriptName}.py`;
+    payload = {
+      type: 'script',
+      scriptName,
+      content: deployFileContent,
+      overwrite,
+      manifest: description ? { description, inputSchema: {}, outputSchema: {}, renderHint: 'text' } : undefined,
+    };
+  } else {
+    const fileName  = document.getElementById('deployFileName')?.value.trim() || deployFileName;
+    const targetDir = deployTargetDir || document.getElementById('deployTargetDir')?.value || 'data';
+    if (!fileName) { toast('請填入存放名稱', 'var(--yellow)'); return; }
+    displayName = fileName;
+    payload = {
+      type: 'file',
+      fileName,
+      targetDir,
+      content: deployFileContent,
+      overwrite,
+    };
+  }
+
+  btn.disabled = true;
+  btn.textContent = '⏳ 推送中...';
+  resultEl.innerHTML = `<div class="deploy-log-entry pending">⏳ 正在推送 ${displayName} 至 ${activeNodeId}...</div>`;
+
+  const t0 = Date.now();
+  try {
+    const res = await safeFetch(`${node.url}/deploy`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Trace-Id': traceId, 'X-Agent-Id': AGENT_ID },
+      body: JSON.stringify(payload),
+      timeout: 20000,
+    });
+    const data = await res.json();
+    const ms   = Date.now() - t0;
+
+    if (data.success) {
+      const extra = deployMode === 'script' && data.manifestUpdated ? ' · manifest 已更新' : '';
+      resultEl.innerHTML = `
+        <div class="deploy-log-entry success">
+          <div style="font-weight:600;color:var(--green)">✓ 推送成功</div>
+          <div style="color:var(--muted);margin-top:4px">${displayName} · ${data.size} bytes · ${ms}ms${extra}</div>
+        </div>`;
+      deployHistory.push({ nodeId: activeNodeId, type: deployMode, name: displayName, size: data.size, ts: new Date().toLocaleTimeString(), success: true });
+      if (deployMode === 'script') await fetchScripts(activeNodeId);
+      toast(`✓ ${displayName} 推送成功`, 'var(--green)');
+      deployFileContent = null;
+      deployFileName = null;
+    } else {
+      throw new Error(data.error || 'Unknown error');
+    }
+  } catch(e) {
+    resultEl.innerHTML = `<div class="deploy-log-entry error">✗ 推送失敗：${e.message}</div>`;
+    deployHistory.push({ nodeId: activeNodeId, type: deployMode, name: displayName, size: 0, ts: new Date().toLocaleTimeString(), success: false });
+    toast(`✗ 推送失敗：${e.message}`, 'var(--red)');
+  }
+
+  btn.disabled = false;
+  btn.textContent = '推送至 ' + activeNodeId;
+  renderDeploy();
+}
+
+async function removeDeployItem(name, type) {
+  const node = nodes.get(activeNodeId);
+  if (!node || !confirm(`確定要從 ${activeNodeId} 移除 ${name}？`)) return;
+  try {
+    const res = await safeFetch(`${node.url}/deploy/${encodeURIComponent(name)}`, { method: 'DELETE', timeout: 8000 });
+    const data = await res.json();
+    if (data.success) {
+      deployHistory = deployHistory.filter(h => !(h.nodeId === activeNodeId && h.name === name));
+      if (type === 'script') await fetchScripts(activeNodeId);
+      toast(`✓ ${name} 已移除`, 'var(--green)');
+      renderDeploy();
+    } else {
+      toast(`✗ ${data.error}`, 'var(--red)');
+    }
+  } catch(e) {
+    toast(`✗ 移除失敗：${e.message}`, 'var(--red)');
+  }
+}
+
+
+// ── File Attachment ────────────────────────────────────────────────────────
+const attachments = new Map(); // uid → { name, content, size }
+const ATTACH_MAX = 512 * 1024; // 512 KB
+const ATTACH_ACCEPT = '.json,.txt,.csv,.tsv,.log,.md';
+
+function buildAttachWidget(uid) {
+  const att = attachments.get(uid);
+  if (att) {
+    return `<div class="attach-bar" id="attachBar_${uid}">
+      <span class="attach-badge">
+        📎 ${att.name}
+        <span style="color:var(--muted)">(${(att.size/1024).toFixed(1)} KB)</span>
+        <button class="clr" onclick="clearAttachment('${uid}')">×</button>
+      </span>
+      <span style="font-size:11px;color:var(--muted)">腳本將從 <code style="color:var(--yellow)">params._filePath</code> 讀取</span>
+    </div>`;
+  }
+  return `<div class="attach-bar" id="attachBar_${uid}">
+    <button class="attach-btn" onclick="triggerAttachPicker('${uid}')">📎 附加文件</button>
+    <span style="font-size:11px;color:var(--muted)">${ATTACH_ACCEPT} · 上限 512KB</span>
+    <input type="file" id="attachInput_${uid}" accept="${ATTACH_ACCEPT}" style="display:none"
+      onchange="onAttachSelected(this,'${uid}')">
+  </div>`;
+}
+
+function getAttachmentData(uid) {
+  return attachments.get(uid) || null;
+}
+
+function clearAttachment(uid) {
+  attachments.delete(uid);
+  const bar = document.getElementById(`attachBar_${uid}`);
+  if (bar) bar.innerHTML = `
+    <button class="attach-btn" onclick="triggerAttachPicker('${uid}')">📎 附加文件</button>
+    <span style="font-size:11px;color:var(--muted)">${ATTACH_ACCEPT} · 上限 512KB</span>
+    <input type="file" id="attachInput_${uid}" accept="${ATTACH_ACCEPT}" style="display:none"
+      onchange="onAttachSelected(this,'${uid}')">`;
+}
+
+function triggerAttachPicker(uid) {
+  document.getElementById(`attachInput_${uid}`)?.click();
+}
+
+function onAttachSelected(input, uid) {
+  const file = input.files[0];
+  if (!file) return;
+  if (file.size > ATTACH_MAX) {
+    toast(`檔案過大 (${(file.size/1024).toFixed(0)} KB)，上限 512 KB`, 'var(--red)');
+    input.value = '';
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = e => {
+    attachments.set(uid, { name: file.name, content: e.target.result, size: file.size });
+    const bar = document.getElementById(`attachBar_${uid}`);
+    if (bar) bar.innerHTML = `
+      <span class="attach-badge">
+        📎 ${file.name}
+        <span style="color:var(--muted)">(${(file.size/1024).toFixed(1)} KB)</span>
+        <button class="clr" onclick="clearAttachment('${uid}')">×</button>
+      </span>
+      <span style="font-size:11px;color:var(--muted)">腳本將從 <code style="color:var(--yellow)">params._filePath</code> 讀取</span>`;
+    toast(`✓ 已附加 ${file.name}`, 'var(--green)');
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+// ── Bootstrap ─────────────────────────────────────────────────────────────
+renderCurl(); // render Curl tab in background so it's ready
+(async () => {
+  // Auto-add the default node
+  const defaultUrl = 'http://192.168.50.140:3000';
+  const tmpId = '192_168_50_140';
+  nodes.set(tmpId, { url: defaultUrl, status: 'checking', health: null, scripts: [] });
+  renderNodeList();
+  await checkNode(tmpId);
+  // Select whichever key now represents this node
+  const finalId = [...nodes.keys()].find(k => nodes.get(k).url === defaultUrl) || tmpId;
+  selectNode(finalId);
+})();
+</script>
+</body>
+</html>
