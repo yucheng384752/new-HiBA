@@ -12,13 +12,14 @@ import { z } from 'zod';
 // ── Error Codes ───────────────────────────────────────────────────────────────
 
 export type HiBAErrorCode =
-  | 'SCHEMA_VALIDATION_ERROR'   // 輸入不符合 inputSchema
+  | 'SCHEMA_VALIDATION_ERROR'   // 輸入不符合 inputSchema 定義
   | 'TOOL_NOT_FOUND'            // Tool 不在 Toolbox 中，或越權呼叫
   | 'AGENT_NOT_REGISTERED'      // TrustRegistry 中找不到 AgentID
   | 'PERMISSION_EXCEEDS_PARENT' // 子 Agent 權限超過父層（A2 違反）
   | 'AUDIT_ANCHOR_FAILED'       // AuditTrail 雜湊驗證失敗（投毒偵測）
   | 'TOOL_TIMEOUT'              // handler 執行超過 timeout 限制
-  | 'MAX_DEPTH_EXCEEDED';       // 委派深度超過上限（T1 定理）
+  | 'MAX_DEPTH_EXCEEDED'        // 委派深度超過上限（T1 定理）
+  | 'HANDLER_EXECUTION_FAILED'; // handler 拋出非預期例外（非 timeout、非 schema 問題，例如內部邏輯錯誤或外部呼叫失敗）
 
 // ── Tool Domain / Permission Types ───────────────────────────────────────────
 
@@ -27,6 +28,12 @@ export type ToolAction = 'read' | 'write';
 
 /** 格式：'{domain}.{action}'，例如 'material.write' */
 export type ToolPermission = `${ToolDomain}.${ToolAction}`;
+
+/**
+ * 格式：'{domain}.{verbObject}'，verbObject 強制 lowerCamelCase（由 defineTool() 在 runtime 驗證）
+ * 型別層面確保 domain 合法，lowerCamelCase 部分由 defineTool() validateToolName 保證
+ */
+export type ToolName = `${ToolDomain}.${string}`;
 
 // ── ResourceAction ────────────────────────────────────────────────────────────
 
@@ -38,6 +45,21 @@ export type ToolPermission = `${ToolDomain}.${ToolAction}`;
 export interface ResourceAction {
   domain: ToolDomain;
   action: ToolAction;
+}
+
+export type DecisionAction = 'install' | 'update' | 'execute' | 'dispatch';
+
+export interface PlanStep {
+  stepId: string;
+  toolName: ToolName;
+  nodeId: string;
+  version: string;
+  input: Record<string, unknown>;
+  dependsOn: string[];
+}
+
+export interface HiBAToolbox {
+  has(toolName: ToolName): boolean;
 }
 
 // ── ToolContext ───────────────────────────────────────────────────────────────
@@ -131,7 +153,7 @@ export interface ToolDefinition<
   TInput extends z.ZodType = z.ZodType,
   TOutput extends z.ZodType = z.ZodType,
 > {
-  name: string;                              // '{domain}.{verbObject}'
+  name: ToolName;                            // '{domain}.{verbObject}' lower camel case
   version: string;                           // semver
   tags: [ToolDomain, ToolAction, ...string[]]; // [domain, read|write, ...]
   description: string;
