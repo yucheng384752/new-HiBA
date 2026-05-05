@@ -1,0 +1,11 @@
+# training data intermediates
+dataset-generated.jsonl
+dataset-test.jsonl
+
+# dev tools (not for commit)
+tools/mock-accounting-server.mjs
+tools/manual-annotation-worksheet.jsonl
+tools/_fill-worksheet.mjs
+
+# dataset output scratch
+*.jsonl.tmp
