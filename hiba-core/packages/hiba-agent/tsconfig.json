@@ -10,7 +10,6 @@
     "noUncheckedIndexedAccess": true,
     "skipLibCheck": true,
     "noEmit": true,
-    "rootDir": ".",
     "baseUrl": "."
   },
   "include": ["src/**/*", "../../hiba.types.ts"]

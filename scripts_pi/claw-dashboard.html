@@ -281,6 +281,50 @@
   .shell-hist-item:hover { background:rgba(88,166,255,.08); color:var(--accent); }
   .shell-resp-stdout { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:12px; font-size:12px; font-family:'Consolas',monospace; color:var(--green); white-space:pre-wrap; max-height:340px; overflow-y:auto; word-break:break-all; }
   .shell-resp-stderr { background:rgba(248,81,73,.05); border:1px solid rgba(248,81,73,.3); border-radius:6px; padding:12px; font-size:12px; font-family:'Consolas',monospace; color:var(--red); white-space:pre-wrap; max-height:120px; overflow-y:auto; word-break:break-all; }
+
+  /* ── Topology Panel ── */
+  .topology-panel { background: var(--surface); display: flex; flex-direction: column; overflow: hidden; }
+  .topo-header { padding: 10px 16px; font-size: 10px; font-weight: 600; font-family: 'Consolas', monospace; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; flex-shrink: 0; }
+  .topo-header button { background: var(--accent); color: #000; border: none; border-radius: 4px; padding: 3px 10px; font-size: 11px; cursor: pointer; font-weight: 600; }
+  .topo-header button:hover { opacity: .85; }
+  .topo-svg-wrap { flex: 1; overflow-y: auto; overflow-x: hidden; padding: 6px 8px 0; }
+  .topo-svg-wrap svg { width: 100%; display: block; overflow: visible; }
+
+  /* ── Workflow Tab ── */
+  .wf-config { display:flex; gap:10px; margin-bottom:14px; flex-wrap:wrap; }
+  .wf-config-group { display:flex; flex-direction:column; gap:4px; flex:1; min-width:180px; }
+  .wf-config-group label { font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-family:Consolas,monospace; }
+  .wf-config-group input { background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:6px 10px; font-size:12px; font-family:Consolas,monospace; }
+  .wf-config-group input:focus { outline:none; border-color:var(--accent); }
+  .wf-task-area { margin-bottom:12px; }
+  .wf-task-area label { display:block; font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-family:Consolas,monospace; margin-bottom:6px; }
+  .wf-task-area textarea { width:100%; background:var(--bg); border:1px solid var(--border); color:var(--text-bright); border-radius:8px; padding:12px; font-size:14px; resize:vertical; min-height:76px; font-family:inherit; line-height:1.5; }
+  .wf-task-area textarea:focus { outline:none; border-color:var(--accent); }
+  .wf-toolbar { display:flex; gap:8px; margin-bottom:20px; }
+  .wf-gen-btn { background:var(--accent); color:#000; border:none; border-radius:6px; padding:8px 22px; font-weight:600; cursor:pointer; font-size:13px; }
+  .wf-gen-btn:hover { opacity:.85; }
+  .wf-gen-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .wf-clear-btn { background:none; border:1px solid var(--border); color:var(--muted); border-radius:6px; padding:8px 16px; cursor:pointer; font-size:13px; }
+  .wf-clear-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .wf-plan-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:14px; padding-bottom:10px; border-bottom:1px solid var(--border); }
+  .wf-select { background:var(--bg); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:5px 10px; font-size:12px; }
+  .wf-select:focus { outline:none; border-color:var(--accent); }
+  .wf-steps { display:flex; flex-direction:column; gap:10px; }
+  .wf-step { background:var(--surface); border:1px solid var(--border); border-left:3px solid var(--border); border-radius:8px; overflow:hidden; transition:border-left-color .15s; }
+  .wf-step.wf-step-active-node { border-left-color:var(--accent); }
+  .wf-step-header { display:flex; align-items:center; gap:10px; padding:9px 14px; background:rgba(0,0,0,.15); border-bottom:1px solid var(--border); }
+  .wf-step-id { font-family:Consolas,monospace; font-size:11px; font-weight:700; color:var(--accent); background:rgba(61,141,232,.15); padding:2px 8px; border-radius:4px; flex-shrink:0; }
+  .wf-step-tool { font-size:12px; font-weight:600; color:var(--text-bright); flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .wf-step-dep { font-size:10px; color:var(--muted); font-family:Consolas,monospace; flex-shrink:0; }
+  .wf-step-body { padding:10px 14px; display:flex; flex-direction:column; gap:6px; }
+  .wf-step-row { display:flex; gap:10px; align-items:flex-start; font-size:12px; }
+  .wf-step-lbl { color:var(--muted); min-width:52px; font-size:10px; text-transform:uppercase; letter-spacing:.06em; padding-top:1px; font-family:Consolas,monospace; flex-shrink:0; }
+  .wf-step-val { color:var(--text); }
+  .wf-step-code { display:block; background:var(--bg); border-radius:4px; padding:6px 8px; font-size:11px; font-family:Consolas,monospace; color:var(--green); white-space:pre-wrap; word-break:break-all; flex:1; }
+  .wf-act-btn { background:none; border:1px solid var(--border); color:var(--muted); border-radius:4px; padding:2px 8px; cursor:pointer; font-size:11px; }
+  .wf-act-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .wf-act-btn.del:hover { border-color:var(--red); color:var(--red); }
+  .wf-err { color:var(--red); padding:16px; background:var(--surface); border:1px solid rgba(232,61,61,.3); border-radius:8px; font-size:13px; }
 </style>
 </head>
 <body>
@@ -292,17 +336,19 @@
 </header>
 
 <div class="layout">
-  <!-- Left: Node list -->
-  <div class="panel nodes-panel">
-    <div class="panel-title">
-      Nodes
+  <!-- Left: Node Topology -->
+  <div class="panel topology-panel">
+    <div class="topo-header">
+      節點拓撲
       <button onclick="refreshAll()">Refresh All</button>
     </div>
     <div class="add-node">
       <input id="newNodeUrl" placeholder="http://192.168.50.140:3000" value="http://192.168.50.140:3000">
       <button onclick="addNode()">Add</button>
     </div>
-    <div id="nodeList"></div>
+    <div class="topo-svg-wrap">
+      <svg id="topologySvg" xmlns="http://www.w3.org/2000/svg"></svg>
+    </div>
   </div>
 
   <!-- Right: Main content -->
@@ -313,6 +359,7 @@
       <div class="tab" onclick="switchTab('curl')">Curl</div>
       <div class="tab" onclick="switchTab('stream')">Stream</div>
       <div class="tab" onclick="switchTab('deploy')">Deploy</div>
+      <div class="tab" onclick="switchTab('workflow')">Workflow</div>
     </div>
     <div class="tab-content">
 
@@ -349,6 +396,37 @@
         </div>
       </div>
 
+      <!-- Workflow Tab -->
+      <div class="tab-pane" id="tab-workflow">
+        <div class="wf-config">
+          <div class="wf-config-group">
+            <label>Planning Server (hiba-agent)</label>
+            <input id="wfPlanningUrl" placeholder="http://localhost:8090"
+              onchange="workflowPlanningUrl=this.value;localStorage.setItem('wf_planning_url',this.value)">
+          </div>
+          <div class="wf-config-group">
+            <label>Accounting Server</label>
+            <input id="wfAccountingUrl" placeholder="http://localhost:9090"
+              onchange="workflowAccountingUrl=this.value;localStorage.setItem('wf_accounting_url',this.value)">
+          </div>
+        </div>
+        <div class="wf-task-area">
+          <label>Task Description（自然語言）</label>
+          <textarea id="nlTaskInput"
+            placeholder="例如：取得 node8 上的 model_121_321.xml，驗證完整性後回傳給 node4"></textarea>
+        </div>
+        <div class="wf-toolbar">
+          <button class="wf-gen-btn" id="generatePlanBtn" onclick="generatePlan()">Generate Plan</button>
+          <button class="wf-clear-btn" onclick="workflowPlan=null;renderPlan()">Clear</button>
+        </div>
+        <div id="wfPlanContainer">
+          <div class="empty-state" style="padding:40px 0">
+            <div class="icon" style="font-size:32px;margin-bottom:8px">🧩</div>
+            Enter a task above and click Generate Plan
+          </div>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -357,13 +435,18 @@
 // ── Constants ──────────────────────────────────────────────────────────────
 const AGENT_ID  = 'claw-dashboard';
 const LS_KEYS   = { favorites: 'claw_favorites', shellHistory: 'claw_shell_history' };
-const TAB_NAMES = ['health', 'scripts', 'curl', 'stream', 'deploy'];
+const TAB_NAMES = ['health', 'scripts', 'curl', 'stream', 'deploy', 'workflow'];
 
 // ── State ──────────────────────────────────────────────────────────────────
 const nodes = new Map(); // nodeId → { url, status, health, scripts }
 let activeNodeId = null;
 let activeTab = 'health';
 let sseSource = null;
+
+// Workflow state
+let workflowPlan = null;
+let workflowPlanningUrl  = localStorage.getItem('wf_planning_url')  || 'http://localhost:8090';
+let workflowAccountingUrl = localStorage.getItem('wf_accounting_url') || 'http://localhost:9090';
 
 // Health auto-refresh
 let healthRefreshInterval = 0; // ms; 0 = manual
@@ -493,27 +576,91 @@ async function refreshAll() {
   for (const id of nodes.keys()) await checkNode(id);
 }
 
-// ── Render Node List ──────────────────────────────────────────────────────
+// ── Render Node Topology (SVG) ────────────────────────────────────────────────
 function renderNodeList() {
-  const container = document.getElementById('nodeList');
-  if (nodes.size === 0) {
-    container.innerHTML = '<div style="padding:20px;text-align:center;color:var(--muted);font-size:12px">No nodes added</div>';
-    return;
+  const svg = document.getElementById('topologySvg');
+  if (!svg) return;
+
+  const W = 280;              // internal SVG coordinate width
+  const entries = [...nodes.entries()];
+  const N = entries.length;
+  const SPACING = 72;
+  const H = Math.max(260, N * SPACING + 90);
+
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.style.height = H + 'px';
+  svg.setAttribute('font-family', "'Segoe UI', system-ui, sans-serif");
+
+  const HUB_X = 46, HUB_Y = H / 2;
+  const NODE_X = 158;
+  const nodeY = (i) => (H - (N > 1 ? (N - 1) * SPACING : 0)) / 2 + i * SPACING;
+  const sc = (s) => s === 'online' ? '#3de88a' : s === 'offline' ? '#e83d3d' : '#e8a83d';
+
+  const p = [];
+
+  // Hub circle
+  p.push(`<circle cx="${HUB_X}" cy="${HUB_Y}" r="26" fill="#0e1218" stroke="#3d8de8" stroke-width="2.5"/>`);
+  p.push(`<text x="${HUB_X}" y="${HUB_Y - 4}" text-anchor="middle" fill="#3d8de8" font-size="11" font-weight="700">CLAW</text>`);
+  p.push(`<text x="${HUB_X}" y="${HUB_Y + 10}" text-anchor="middle" fill="#4a6080" font-size="9">dashboard</text>`);
+
+  if (N === 0) {
+    p.push(`<text x="${W / 2 + 14}" y="${HUB_Y - 6}" text-anchor="middle" fill="#4a6080" font-size="12">No nodes</text>`);
+    p.push(`<text x="${W / 2 + 14}" y="${HUB_Y + 12}" text-anchor="middle" fill="#4a6080" font-size="10">Add a node above</text>`);
+  } else {
+    entries.forEach(([id, node], i) => {
+      const ny = nodeY(i);
+      const color = sc(node.status);
+      const isActive = id === activeNodeId;
+      const shortId = id.length > 17 ? id.slice(0, 15) + '…' : id;
+      const urlObj = parseUrl(node.url);
+      const sub = urlObj ? `${urlObj.hostname}:${urlObj.port || '80'}` : '';
+
+      // Bezier connector hub → node
+      const cpX = (HUB_X + 26 + NODE_X - 17) / 2;
+      const dashAttr = isActive ? '' : 'stroke-dasharray="5,4"';
+      p.push(`<path d="M${HUB_X + 26},${HUB_Y} C${cpX},${HUB_Y} ${cpX},${ny} ${NODE_X - 17},${ny}" fill="none" stroke="${color}" stroke-width="1.5" stroke-opacity="${isActive ? 0.7 : 0.35}" ${dashAttr}/>`);
+
+      p.push(`<g onclick="selectNode('${id}')" style="cursor:pointer">`);
+
+      // Active selection rect
+      if (isActive) {
+        const rw = W - NODE_X + 8;
+        p.push(`<rect x="${NODE_X - 18}" y="${ny - 26}" width="${rw}" height="52" rx="6" fill="rgba(61,141,232,0.1)" stroke="#3d8de8" stroke-width="1" stroke-opacity="0.5"/>`);
+      }
+
+      // Node ring
+      p.push(`<circle cx="${NODE_X}" cy="${ny}" r="16" fill="#0b0d12" stroke="${color}" stroke-width="${isActive ? 2.5 : 1.5}"/>`);
+
+      // Inner status dot (animated if checking)
+      if (node.status === 'checking') {
+        p.push(`<circle cx="${NODE_X}" cy="${ny}" r="5" fill="${color}"><animate attributeName="opacity" values="1;0.2;1" dur="1.2s" repeatCount="indefinite"/></circle>`);
+      } else {
+        p.push(`<circle cx="${NODE_X}" cy="${ny}" r="5" fill="${color}"/>`);
+      }
+
+      // Labels to the right of the node ring
+      const lx = NODE_X + 22;
+      const fc = isActive ? '#e0ecf8' : '#b8c8d8';
+      p.push(`<text x="${lx}" y="${ny - 3}" fill="${fc}" font-size="11" font-weight="${isActive ? 600 : 400}">${shortId}</text>`);
+      if (sub) p.push(`<text x="${lx}" y="${ny + 11}" fill="#4a6080" font-size="9">${sub}</text>`);
+      if (node.scripts?.length) p.push(`<text x="${lx}" y="${ny + 22}" fill="#4a6080" font-size="9">${node.scripts.length} scripts</text>`);
+
+      p.push(`</g>`);
+    });
+
+    // Stats row at bottom
+    const online   = [...nodes.values()].filter(n => n.status === 'online').length;
+    const offline  = [...nodes.values()].filter(n => n.status === 'offline').length;
+    const checking = [...nodes.values()].filter(n => n.status === 'checking').length;
+    let sx = 8, sy = H - 8;
+    const sdot = (x, col) => `<circle cx="${x}" cy="${sy - 3.5}" r="3.5" fill="${col}"/>`;
+    const slbl = (x, col, t) => `<text x="${x}" y="${sy}" fill="${col}" font-size="9">${t}</text>`;
+    if (online)   { p.push(sdot(sx, '#3de88a')); p.push(slbl(sx + 8, '#3de88a', `${online} online`));    sx += 68; }
+    if (checking) { p.push(sdot(sx, '#e8a83d')); p.push(slbl(sx + 8, '#e8a83d', `${checking} checking`)); sx += 76; }
+    if (offline)  { p.push(sdot(sx, '#e83d3d')); p.push(slbl(sx + 8, '#e83d3d', `${offline} offline`));  }
   }
-  container.innerHTML = [...nodes.entries()].map(([id, node]) => `
-    <div class="node-card ${activeNodeId === id ? 'active' : ''}" onclick="selectNode('${id}')">
-      <div class="node-header">
-        <div class="dot ${node.status}"></div>
-        <span class="node-id">${id}</span>
-      </div>
-      <div class="node-url">${node.url}</div>
-      <div class="node-meta">
-        <span>${node.status === 'online' ? '● Online' : node.status === 'offline' ? '○ Offline' : '◌ Checking...'}</span>
-        ${node.scripts.length ? `<span>${node.scripts.length} scripts</span>` : ''}
-        ${node.health?.uptime != null ? `<span>up ${formatUptime(node.health.uptime)}</span>` : ''}
-      </div>
-    </div>
-  `).join('');
+
+  svg.innerHTML = p.join('');
 }
 
 function formatUptime(s) {
@@ -534,6 +681,7 @@ function switchTab(tab) {
   if (tab === 'health' && healthRefreshInterval > 0 && activeNodeId) startHealthTimer();
   if (activeNodeId) renderActiveNode();
   if (tab === 'curl' && !activeNodeId) renderCurl();
+  if (tab === 'workflow') renderWorkflow();
 }
 
 function renderActiveNode() {
@@ -1367,9 +1515,9 @@ async function runDeploy() {
       resultEl.innerHTML = `
         <div class="deploy-log-entry success">
           <div style="font-weight:600;color:var(--green)">✓ 推送成功</div>
-          <div style="color:var(--muted);margin-top:4px">${displayName} · ${data.size} bytes · ${ms}ms${extra}</div>
+          <div style="color:var(--muted);margin-top:4px">${displayName} · ${data.sizeBytes ?? data.size ?? 0} bytes · ${ms}ms${extra}</div>
         </div>`;
-      deployHistory.push({ nodeId: activeNodeId, type: deployMode, name: displayName, size: data.size, ts: new Date().toLocaleTimeString(), success: true });
+      deployHistory.push({ nodeId: activeNodeId, type: deployMode, name: displayName, size: data.sizeBytes ?? data.size ?? 0, ts: new Date().toLocaleTimeString(), success: true });
       if (deployMode === 'script') await fetchScripts(activeNodeId);
       toast(`✓ ${displayName} 推送成功`, 'var(--green)');
       deployFileContent = null;
@@ -1473,6 +1621,128 @@ function onAttachSelected(input, uid) {
     toast(`✓ 已附加 ${file.name}`, 'var(--green)');
   };
   reader.readAsText(file, 'utf-8');
+}
+
+// ── Workflow Tab ──────────────────────────────────────────────────────────────
+
+function renderWorkflow() {
+  document.getElementById('wfPlanningUrl').value   = workflowPlanningUrl;
+  document.getElementById('wfAccountingUrl').value = workflowAccountingUrl;
+  renderPlan();
+}
+
+async function generatePlan() {
+  const task = document.getElementById('nlTaskInput').value.trim();
+  if (!task) { toast('請輸入任務描述', 'var(--amber)'); return; }
+
+  const btn = document.getElementById('generatePlanBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Generating…';
+
+  try {
+    const res = await safeFetch(`${workflowPlanningUrl}/api/plan`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task }),
+      timeout: 60_000,
+    });
+    if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0,120)}`); }
+    workflowPlan = await res.json();
+    renderPlan();
+    toast('Plan generated', 'var(--green)');
+  } catch (e) {
+    toast(`Plan failed: ${e.message}`, 'var(--red)');
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Generate Plan';
+  }
+}
+
+function renderPlan() {
+  const container = document.getElementById('wfPlanContainer');
+  if (!workflowPlan) {
+    container.innerHTML = `<div class="empty-state" style="padding:40px 0">
+      <div class="icon" style="font-size:32px;margin-bottom:8px">🧩</div>
+      Enter a task above and click Generate Plan</div>`;
+    return;
+  }
+  if (workflowPlan.error) {
+    container.innerHTML = `<div class="wf-err">Plan error: ${workflowPlan.error}</div>`;
+    return;
+  }
+
+  const policyOpts = ['fail-fast','partial-success']
+    .map(p => `<option value="${p}"${workflowPlan.supervisorPolicy===p?' selected':''}>${p}</option>`)
+    .join('');
+
+  const stepsHtml = (workflowPlan.steps || []).map((step, i) => `
+    <div class="wf-step${activeNodeId===step.nodeId?' wf-step-active-node':''}">
+      <div class="wf-step-header">
+        <span class="wf-step-id">${step.stepId}</span>
+        <span class="wf-step-tool">${step.toolName}</span>
+        ${step.dependsOn?.length ? `<span class="wf-step-dep">after ${step.dependsOn.join(', ')}</span>` : ''}
+        <span style="margin-left:auto;display:flex;gap:4px">
+          <button class="wf-act-btn" onclick="editStep(${i})">Edit</button>
+          <button class="wf-act-btn del" onclick="removeStep(${i})">×</button>
+        </span>
+      </div>
+      <div class="wf-step-body">
+        <div class="wf-step-row">
+          <span class="wf-step-lbl">Node</span><span class="wf-step-val">${step.nodeId}</span>
+        </div>
+        <div class="wf-step-row">
+          <span class="wf-step-lbl">Version</span><span class="wf-step-val">${step.version||'—'}</span>
+        </div>
+        <div class="wf-step-row">
+          <span class="wf-step-lbl">Input</span>
+          <code class="wf-step-code">${JSON.stringify(step.input||{}, null, 2)}</code>
+        </div>
+      </div>
+    </div>`).join('');
+
+  container.innerHTML = `
+    <div class="wf-plan-header">
+      <span style="font-size:13px;color:var(--text-bright);font-weight:600">
+        ${workflowPlan.steps.length} step${workflowPlan.steps.length!==1?'s':''}
+      </span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="font-size:11px;color:var(--muted)">Policy:</span>
+        <select class="wf-select" onchange="workflowPlan.supervisorPolicy=this.value">${policyOpts}</select>
+        <button class="run-btn" onclick="executePlan()">▶ Execute</button>
+      </div>
+    </div>
+    <div class="wf-steps">${stepsHtml}</div>
+    <button class="add-row-btn" style="margin-top:12px;width:100%" onclick="addStep()">+ Add Step</button>`;
+}
+
+function editStep(i) {
+  const step = workflowPlan?.steps[i];
+  if (!step) return;
+  const raw = prompt(`Edit step ${step.stepId} — input JSON:`, JSON.stringify(step.input, null, 2));
+  if (raw === null) return;
+  try { step.input = JSON.parse(raw); renderPlan(); }
+  catch { toast('Invalid JSON', 'var(--red)'); }
+}
+
+function removeStep(i) {
+  workflowPlan?.steps.splice(i, 1);
+  renderPlan();
+}
+
+function addStep() {
+  if (!workflowPlan) workflowPlan = { steps: [], supervisorPolicy: 'fail-fast' };
+  const id = `S${workflowPlan.steps.length + 1}`;
+  workflowPlan.steps.push({
+    stepId: id, toolName: 'material.protectFile',
+    nodeId: activeNodeId || 'node1', version: '1.0.0',
+    input: {}, dependsOn: [],
+  });
+  renderPlan();
+}
+
+async function executePlan() {
+  if (!workflowPlan?.steps?.length) { toast('No steps to execute', 'var(--amber)'); return; }
+  toast('Execute endpoint not yet connected — implement POST /api/execute on AgentServer', 'var(--amber)');
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────

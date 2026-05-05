@@ -165,6 +165,19 @@ export interface ToolDefinition<
   handler: (input: z.infer<TInput>, ctx: ToolContext) => Promise<z.infer<TOutput>>;
 }
 
+// ── Execution Plan ────────────────────────────────────────────────────────────
+
+/**
+ * NLPlanningService.plan() 的輸出。
+ * steps 為有序執行步驟（可含 dependsOn DAG）；
+ * supervisorPolicy 控制任一步驟失敗時的後續行為。
+ */
+export interface ExecutionPlan {
+  steps: PlanStep[];
+  supervisorPolicy: 'fail-fast' | 'partial-success';
+  error?: string;   // 規劃失敗時填入，steps 為空陣列
+}
+
 // ── Audit Writer ──────────────────────────────────────────────────────────────
 
 /** 稽核寫入介面，可替換為 SQLite / PostgreSQL / Blockchain 實作 */
