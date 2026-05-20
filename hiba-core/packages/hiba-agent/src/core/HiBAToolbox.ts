@@ -8,7 +8,7 @@ import type {
   ToolFailure,
   ToolName,
   ToolResult,
-} from '../../../../hiba.types';
+} from '../types/hiba.types';
 import type { RegisteredTool } from './defineTool';
 
 export interface HiBAToolboxOptions {

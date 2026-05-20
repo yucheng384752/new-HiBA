@@ -1,0 +1,112 @@
+[
+  {
+    "orderId":    "WO-2026-001",
+    "product":    "齒輪 A-型",
+    "material":   "SS304",
+    "quantity":   100,
+    "unit":       "pcs",
+    "priority":   "high",
+    "deadline":   "2026-04-15T08:00:00Z",
+    "assignedLine": "LINE-01",
+    "status":     "pending"
+  },
+  {
+    "orderId":    "WO-2026-002",
+    "product":    "軸承座 B-型",
+    "material":   "鋁合金 6061",
+    "quantity":   50,
+    "unit":       "pcs",
+    "priority":   "normal",
+    "deadline":   "2026-04-18T17:00:00Z",
+    "assignedLine": "LINE-02",
+    "status":     "pending"
+  },
+  {
+    "orderId":    "WO-2026-003",
+    "product":    "連接器外殼",
+    "material":   "ABS",
+    "quantity":   500,
+    "unit":       "pcs",
+    "priority":   "low",
+    "deadline":   "2026-04-22T17:00:00Z",
+    "assignedLine": "LINE-03",
+    "status":     "in_progress"
+  },
+  {
+    "orderId":    "WO-2026-004",
+    "product":    "精密凸輪軸",
+    "material":   "SKD11",
+    "quantity":   20,
+    "unit":       "pcs",
+    "priority":   "urgent",
+    "deadline":   "2026-04-14T12:00:00Z",
+    "assignedLine": "LINE-01",
+    "status":     "pending"
+  },
+  {
+    "orderId":    "WO-2026-005",
+    "product":    "矽膠墊片 C-型",
+    "material":   "矽膠 Shore-60",
+    "quantity":   2000,
+    "unit":       "pcs",
+    "priority":   "normal",
+    "deadline":   "2026-04-25T17:00:00Z",
+    "assignedLine": "LINE-04",
+    "status":     "pending"
+  },
+  {
+    "orderId":    "WO-2026-006",
+    "product":    "鋁擠型散熱片",
+    "material":   "鋁合金 6063",
+    "quantity":   300,
+    "unit":       "pcs",
+    "priority":   "high",
+    "deadline":   "2026-04-16T08:00:00Z",
+    "assignedLine": "LINE-02",
+    "status":     "pending"
+  },
+  {
+    "orderId":    "WO-2026-007",
+    "product":    "鑄鐵底座",
+    "material":   "FC250 鑄鐵",
+    "quantity":   10,
+    "unit":       "pcs",
+    "priority":   "low",
+    "deadline":   "2026-04-30T17:00:00Z",
+    "assignedLine": "LINE-01",
+    "status":     "pending"
+  },
+  {
+    "orderId":    "WO-2026-008",
+    "product":    "銅製接頭",
+    "material":   "C3604 黃銅",
+    "quantity":   800,
+    "unit":       "pcs",
+    "priority":   "normal",
+    "deadline":   "2026-04-20T17:00:00Z",
+    "assignedLine": "LINE-03",
+    "status":     "completed"
+  },
+  {
+    "orderId":    "WO-2026-009",
+    "product":    "焊接支架",
+    "material":   "SPCC 鋼板",
+    "quantity":   150,
+    "unit":       "pcs",
+    "priority":   "high",
+    "deadline":   "2026-04-17T08:00:00Z",
+    "assignedLine": "LINE-04",
+    "status":     "pending"
+  },
+  {
+    "orderId":    "WO-2026-010",
+    "product":    "測試用治具",
+    "material":   "POM 塑鋼",
+    "quantity":   5,
+    "unit":       "set",
+    "priority":   "normal",
+    "deadline":   "2026-04-28T17:00:00Z",
+    "assignedLine": "LINE-02",
+    "status":     "pending"
+  }
+]

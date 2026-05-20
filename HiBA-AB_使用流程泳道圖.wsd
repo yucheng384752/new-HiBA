@@ -1,0 +1,152 @@
+@startuml 
+title HiBA-AB 使用流程泳道圖
+
+skinparam shadowing false
+skinparam backgroundColor #FFFFFF
+skinparam defaultFontName "Microsoft JhengHei"
+skinparam activity {
+  BorderColor #3B4252
+  BackgroundColor #F8FAFC
+  DiamondBackgroundColor #FFF7D6
+  DiamondBorderColor #8A6D1D
+  StartColor #2F855A
+  EndColor #2B6CB0
+}
+
+|Admin / Operator|
+start
+:開啟 Claw Dashboard;
+
+if (是否有新節點待註冊?) then (是)
+  |RPi Agent|
+  :開機後執行 announce;
+  :收集 hostname / IP / MAC / publicKey;
+  :POST /api/nodes/announce;
+
+  |Accounting Server|
+  :寫入 TrustRegistry;
+  :節點狀態 = pending;
+  :推送 SSE node:announce;
+
+  |Admin / Operator|
+  :審核節點資訊;
+  :按下 Approve / Register;
+
+  |Accounting Server|
+  :更新 TrustRegistry;
+  :節點狀態 = registered;
+  :推送 SSE node:registered;
+
+  |RPi Agent|
+  :啟動輕量 Agent;
+  :開始 heartbeat;
+
+  |Accounting Server|
+  :執行 capability probe;
+  :分類 node profile;
+  :節點狀態 = profiled / online;
+else (否)
+endif
+
+|Admin / Operator|
+:輸入自然語言任務;
+:送出執行要求;
+
+|Claw Dashboard|
+:POST /api/plan;
+:附帶 X-Agent-Id / X-Trace-Id / X-Depth;
+
+|AgentServer|
+:建立 ToolContext;
+:呼叫 NLPlanningService.plan(task, ctx);
+
+|Accounting Server|
+:listNodeResources();
+:回傳各節點資源清單;
+
+|Planner / LLM|
+:讀取 task、resources、availableTools;
+:產生 ExecutionPlan;
+:以 Zod 驗證 PlanStep;
+
+if (ExecutionPlan 是否有效?) then (否)
+  |AgentServer|
+  :回傳 plan parse failed;
+  |Claw Dashboard|
+  :顯示規劃錯誤;
+  stop
+else (是)
+endif
+
+|Claw Dashboard|
+:顯示 ExecutionPlan;
+:使用者確認執行;
+
+repeat
+  |AgentServer|
+  :取出下一個 PlanStep;
+
+  |ResourceDecisionService|
+  :clear checker cache;
+
+  if (toolbox.has(toolName)?) then (否)
+    |NodeCapabilityChecker|
+    :canInstall(nodeId, ctx)?;
+
+    if (可安裝?) then (是)
+      |HiBA Toolbox|
+      :install / register tool;
+      :準備執行 tool;
+    else (否)
+      |HiBA-B / Broker Layer|
+      :封裝 SignedTask;
+      :dispatch 到可處理節點;
+      |RPi Agent|
+      :接收任務並執行;
+    endif
+
+  else (是)
+    |NodeCapabilityChecker|
+    :isStale(nodeId, toolName, version)?;
+
+    if (版本過期?) then (是)
+      |HiBA Toolbox|
+      :update tool;
+      :重新 register;
+    else (否)
+    endif
+
+    |HiBA Toolbox|
+    :execute(toolName, input, ctx);
+  endif
+
+  |Trust / Security|
+  :驗證 AgentIdentity / permission;
+  :必要時使用 TPM 簽章或驗章;
+
+  if (驗證或權限是否通過?) then (否)
+    |AuditTrail|
+    :記錄失敗 ToolResult;
+    |AgentServer|
+    :依 supervisorPolicy 中止或保留部分結果;
+  else (是)
+    |AuditTrail|
+    :記錄成功 ToolResult;
+    :保存 traceId / stepId / agentId;
+  endif
+
+repeat while (還有下一個 PlanStep?) is (是)
+
+|AgentServer|
+:彙整所有 ToolResult;
+:回傳任務結果;
+
+|Claw Dashboard|
+:更新畫面與執行狀態;
+:顯示 audit proof / error message;
+
+|Admin / Operator|
+:檢視結果與稽核紀錄;
+stop
+
+@enduml

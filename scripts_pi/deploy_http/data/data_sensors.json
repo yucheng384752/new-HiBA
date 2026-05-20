@@ -1,0 +1,86 @@
+[
+  {
+    "sensorId":   "sensor-01",
+    "name":       "廠房A 生產線旁",
+    "type":       "DHT22",
+    "location":   "廠房A - LINE-01 旁",
+    "normalRange": {
+      "temperature": [20.0, 26.0],
+      "humidity":    [45.0, 65.0]
+    },
+    "alertThreshold": {
+      "temperature": 30.0,
+      "humidity":    80.0
+    }
+  },
+  {
+    "sensorId":   "sensor-02",
+    "name":       "廠房A 出入口",
+    "type":       "DHT22",
+    "location":   "廠房A - 東側出入口",
+    "normalRange": {
+      "temperature": [18.0, 28.0],
+      "humidity":    [40.0, 70.0]
+    },
+    "alertThreshold": {
+      "temperature": 32.0,
+      "humidity":    85.0
+    }
+  },
+  {
+    "sensorId":   "sensor-03",
+    "name":       "廠房B 壓鑄區",
+    "type":       "SHT31",
+    "location":   "廠房B - LINE-03 壓鑄機旁",
+    "normalRange": {
+      "temperature": [24.0, 34.0],
+      "humidity":    [30.0, 55.0]
+    },
+    "alertThreshold": {
+      "temperature": 40.0,
+      "humidity":    70.0
+    }
+  },
+  {
+    "sensorId":   "sensor-04",
+    "name":       "廠房B 倉庫",
+    "type":       "DHT22",
+    "location":   "廠房B - 原料倉庫",
+    "normalRange": {
+      "temperature": [15.0, 25.0],
+      "humidity":    [35.0, 60.0]
+    },
+    "alertThreshold": {
+      "temperature": 28.0,
+      "humidity":    75.0
+    }
+  },
+  {
+    "sensorId":   "sensor-05",
+    "name":       "機房 UPS室",
+    "type":       "SHT31",
+    "location":   "主機房 - UPS 設備室",
+    "normalRange": {
+      "temperature": [18.0, 24.0],
+      "humidity":    [40.0, 60.0]
+    },
+    "alertThreshold": {
+      "temperature": 27.0,
+      "humidity":    70.0
+    }
+  },
+  {
+    "sensorId":   "sensor-06",
+    "name":       "戶外環境",
+    "type":       "DHT22",
+    "location":   "屋頂 - 戶外環境監測",
+    "normalRange": {
+      "temperature": [10.0, 35.0],
+      "humidity":    [30.0, 90.0]
+    },
+    "alertThreshold": {
+      "temperature": 40.0,
+      "humidity":    95.0
+    }
+  }
+]

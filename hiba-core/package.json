@@ -5,6 +5,7 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
+    "accounting": "node tools/accounting-server.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test --require ts-node/register hiba.toolbox.test.ts hiba.audit.sqlite.test.ts"
   },

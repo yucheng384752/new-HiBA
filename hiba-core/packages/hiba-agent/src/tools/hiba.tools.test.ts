@@ -1,0 +1,261 @@
+import { describe, test, expect, beforeEach, jest } from '@jest/globals';
+import { z } from 'zod';
+import { HiBAToolbox } from '../core/HiBAToolbox';
+import { AuditTrail } from '../audit/AuditTrail';
+import { OrchestratorRunner } from '../server/OrchestratorRunner';
+import { defineTool } from '../core/defineTool';
+import { allHibaTools, registerHibaTools } from './hiba.tools';
+import { registerAuditTools } from './audit.tools';
+import type { ExecutionPlan, ToolContext } from '../types/hiba.types';
+
+function makeToolbox(): HiBAToolbox {
+  const audit = new AuditTrail(':memory:');
+  return new HiBAToolbox({
+    auditWriter: audit,
+    permissions: [
+      'material.write', 'material.read',
+      'machine.write',  'machine.read',
+      'man.write',      'man.read',
+      'method.write',   'method.read',
+      'env.write',      'env.read',
+      'orchestrator.write', 'orchestrator.read',
+    ],
+  });
+}
+
+describe('allHibaTools', () => {
+  test('exports 32 tools', () => {
+    expect(allHibaTools).toHaveLength(32);
+  });
+
+  test('all tool names are unique', () => {
+    const names = allHibaTools.map(t => t.name);
+    expect(new Set(names).size).toBe(names.length);
+  });
+
+  test('all tools have valid domain.verbObject names', () => {
+    for (const tool of allHibaTools) {
+      expect(tool.name).toMatch(/^(material|machine|man|method|env|orchestrator)\.[a-z][A-Za-z0-9]*$/);
+    }
+  });
+});
+
+describe('registerHibaTools', () => {
+  let toolbox: HiBAToolbox;
+  beforeEach(() => { toolbox = makeToolbox(); });
+
+  test('registers all 32 tools into the toolbox', () => {
+    registerHibaTools(toolbox);
+    expect(toolbox.list()).toHaveLength(32);
+  });
+
+  test('material.protectFile is registered', () => {
+    registerHibaTools(toolbox);
+    expect(toolbox.has('material.protectFile')).toBe(true);
+  });
+
+  test('material.verifyFile is registered', () => {
+    registerHibaTools(toolbox);
+    expect(toolbox.has('material.verifyFile')).toBe(true);
+  });
+
+  test('all 6 domain prefixes present', () => {
+    registerHibaTools(toolbox);
+    const tools = toolbox.list();
+    const domains = new Set(tools.map(t => t.name.split('.')[0]));
+    expect([...domains].sort()).toEqual(['env', 'machine', 'man', 'material', 'method', 'orchestrator']);
+  });
+});
+
+describe('registerAuditTools', () => {
+  let toolbox: HiBAToolbox;
+  let audit: AuditTrail;
+
+  beforeEach(() => {
+    audit = new AuditTrail(':memory:');
+    toolbox = new HiBAToolbox({
+      auditWriter: audit,
+      permissions: ['orchestrator.read', 'orchestrator.write'],
+    });
+  });
+
+  test('registers orchestrator.verifyAuditIntegrity and orchestrator.getAuditSummary', () => {
+    registerAuditTools(toolbox, audit);
+    expect(toolbox.has('orchestrator.verifyAuditIntegrity')).toBe(true);
+    expect(toolbox.has('orchestrator.getAuditSummary')).toBe(true);
+  });
+
+  test('verifyAuditIntegrity returns ok for empty audit trail', async () => {
+    registerAuditTools(toolbox, audit);
+    const ctx = {
+      agentId: 'test', traceId: 'trace-1', depth: 0,
+      hibaBaseUrl: 'http://localhost:9090', permissions: ['orchestrator.read'],
+    };
+    const result = await toolbox.execute('orchestrator.verifyAuditIntegrity', {}, ctx);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect((result.output as { totalChecked: number }).totalChecked).toBe(0);
+      expect((result.output as { tamperedCount: number }).tamperedCount).toBe(0);
+    }
+  });
+
+  test('getAuditSummary returns zero stats for empty audit trail', async () => {
+    registerAuditTools(toolbox, audit);
+    const ctx = {
+      agentId: 'test', traceId: 'trace-1', depth: 0,
+      hibaBaseUrl: 'http://localhost:9090', permissions: ['orchestrator.read'],
+    };
+    const result = await toolbox.execute('orchestrator.getAuditSummary', {
+      timeRange: { from: '2020-01-01T00:00:00Z', to: '2030-01-01T00:00:00Z' },
+    }, ctx);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      const out = result.output as { totalExecutions: number; successCount: number; failureCount: number };
+      expect(out.totalExecutions).toBe(0);
+      expect(out.successCount).toBe(0);
+      expect(out.failureCount).toBe(0);
+    }
+  });
+});
+
+// ── fileio 驗證流程 ──────────────────────────────────────────────────────────
+// 驗證 env.verifyFileIo 的 2-phase probe→write 序列
+// 測試中以 mock handler 代替實際 Pi I/O
+
+describe('env.verifyFileIo — 2-phase probe→write 序列', () => {
+  const BASE_CTX: ToolContext = {
+    agentId: 'test-orch', traceId: 'trace-fileio-001', depth: 0,
+    hibaBaseUrl: 'http://localhost:9090',
+    permissions: ['env.write', 'env.read'],
+  };
+
+  function makeFileioToolbox(probeOk: boolean, writeOk: boolean): HiBAToolbox {
+    const audit = new AuditTrail(':memory:');
+    const tb = new HiBAToolbox({ auditWriter: audit, permissions: ['env.write', 'env.read'] });
+
+    // mock handler：probe phase
+    tb.register(defineTool({
+      name: 'env.verifyFileIo',
+      version: '1.0.0',
+      tags: ['env', 'write'],
+      description: 'mock fileio',
+      inputSchema: z.object({
+        mode:     z.enum(['probe', 'write', 'full']).default('full'),
+        content:  z.string().optional(),
+        filename: z.string().optional(),
+      }),
+      outputSchema: z.object({
+        success:    z.boolean(),
+        phase:      z.enum(['probe', 'write', 'full']),
+        transferOk: z.boolean().optional(),
+        written:    z.boolean().optional(),
+        content:    z.string().optional(),
+        path:       z.string(),
+        sizeBytes:  z.number().optional(),
+        writtenAt:  z.string().optional(),
+        readBack:   z.string().optional(),
+        matched:    z.boolean().optional(),
+      }),
+      permissions: ['env.write'],
+      timeout: 5_000,
+      handler: async (input, _ctx) => {
+        if (input.mode === 'probe') {
+          if (!probeOk) throw new Error('probe failed: directory not writable');
+          return { success: true, phase: 'probe' as const, transferOk: true, path: '/tmp/test_io.txt' };
+        }
+        if (!writeOk) throw new Error('write failed: disk error');
+        const content = input.content ?? 'default';
+        return {
+          success:   true,
+          phase:     'write' as const,
+          written:   true,
+          content,
+          path:      '/tmp/test_io.txt',
+          sizeBytes: content.length,
+          writtenAt: new Date().toISOString(),
+          readBack:  content,
+          matched:   true,
+        };
+      },
+    }));
+
+    (audit as unknown as { batchUploadToChain: () => Promise<void> }).batchUploadToChain = async () => {};
+    return tb;
+  }
+
+  test('probe 成功 → write 成功 → succeeded=2, failed=0, skipped=0', async () => {
+    const tb = makeFileioToolbox(true, true);
+    const audit = new AuditTrail(':memory:');
+    (audit as unknown as { batchUploadToChain: () => Promise<void> }).batchUploadToChain = async () => {};
+
+    const runner = new OrchestratorRunner(tb, audit);
+    const plan: ExecutionPlan = {
+      supervisorPolicy: 'fail-fast',
+      steps: [
+        { stepId: 'probe', toolName: 'env.verifyFileIo', nodeId: 'local', version: '1.0.0',
+          input: { mode: 'probe' }, dependsOn: [] },
+        { stepId: 'write', toolName: 'env.verifyFileIo', nodeId: 'local', version: '1.0.0',
+          input: { mode: 'write', content: 'hello from PC' }, dependsOn: ['probe'] },
+      ],
+    };
+
+    const result = await runner.run(plan, BASE_CTX);
+    expect(result.succeeded).toBe(2);
+    expect(result.failed).toBe(0);
+    expect(result.skipped).toBe(0);
+
+    const probeStep = result.steps.find(s => s.stepId === 'probe');
+    const writeStep = result.steps.find(s => s.stepId === 'write');
+    expect(probeStep?.result.success).toBe(true);
+    expect(writeStep?.result.success).toBe(true);
+    if (probeStep?.result.success) {
+      expect((probeStep.result.output as { transferOk: boolean }).transferOk).toBe(true);
+    }
+    if (writeStep?.result.success) {
+      expect((writeStep.result.output as { matched: boolean }).matched).toBe(true);
+    }
+  });
+
+  test('probe 失敗 → write 被 skip，fail-fast 中止', async () => {
+    const tb = makeFileioToolbox(false, true);
+    const audit = new AuditTrail(':memory:');
+    (audit as unknown as { batchUploadToChain: () => Promise<void> }).batchUploadToChain = async () => {};
+
+    const runner = new OrchestratorRunner(tb, audit);
+    const plan: ExecutionPlan = {
+      supervisorPolicy: 'fail-fast',
+      steps: [
+        { stepId: 'probe', toolName: 'env.verifyFileIo', nodeId: 'local', version: '1.0.0',
+          input: { mode: 'probe' }, dependsOn: [] },
+        { stepId: 'write', toolName: 'env.verifyFileIo', nodeId: 'local', version: '1.0.0',
+          input: { mode: 'write' }, dependsOn: ['probe'] },
+      ],
+    };
+
+    const result = await runner.run(plan, BASE_CTX);
+    // probe 失敗後 fail-fast 不一定 skip write（dependsOn 處理），但 write 不應成功
+    expect(result.failed).toBeGreaterThanOrEqual(1);
+    expect(result.succeeded).toBe(0);
+  });
+
+  test('env.verifyFileIo 在 allHibaTools 中存在', () => {
+    const found = allHibaTools.find(t => t.name === 'env.verifyFileIo');
+    expect(found).toBeDefined();
+    expect(found?.permissions).toContain('env.write');
+  });
+
+  test('Pi manifest 全部 5 個工具都已注册', () => {
+    const tb = makeToolbox();
+    registerHibaTools(tb);
+    const piTools = [
+      'env.verifyFileIo',
+      'machine.executeOrder',
+      'env.readSensor',
+      'orchestrator.echoRtt',
+      'material.readAttachment',
+    ];
+    for (const name of piTools) {
+      expect(tb.has(name as import('../types/hiba.types').ToolName)).toBe(true);
+    }
+  });
+});

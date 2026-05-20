@@ -1,7 +1,7 @@
 import { describe, expect, it, jest, afterEach } from '@jest/globals';
 import { z } from 'zod';
 import { defineTool } from './defineTool';
-import type { ToolDefinition, ToolName } from '../../../../hiba.types';
+import type { ToolDefinition, ToolName } from '../types/hiba.types';
 
 const inputSchema = z.object({
   filePath: z.string(),

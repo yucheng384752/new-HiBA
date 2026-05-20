@@ -7,7 +7,7 @@ import type {
   AuditRecord,
   AuditWriter,
   ToolContext,
-} from '../../../../../hiba.types';
+} from '../../types/hiba.types';
 
 const baseCtx: ToolContext = {
   hibaBaseUrl: 'http://localhost:8080',

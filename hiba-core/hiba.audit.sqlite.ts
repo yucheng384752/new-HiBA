@@ -20,20 +20,27 @@ import type { AuditRecord, AuditWriter } from './hiba.types';
 
 const CREATE_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS tool_audit_log (
-  id          INTEGER PRIMARY KEY AUTOINCREMENT,
-  traceId     TEXT    NOT NULL,
-  agentId     TEXT    NOT NULL,
-  depth       INTEGER NOT NULL,
-  toolName    TEXT    NOT NULL,
-  toolDomain  TEXT    NOT NULL,
-  version     TEXT    NOT NULL,
-  success     INTEGER NOT NULL,
-  durationMs  INTEGER NOT NULL,
-  executedAt  TEXT    NOT NULL,
-  errorCode   TEXT,
-  errorMsg    TEXT,
-  auditHash   TEXT    NOT NULL
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  traceId       TEXT    NOT NULL,
+  agentId       TEXT    NOT NULL,
+  depth         INTEGER NOT NULL,
+  toolName      TEXT    NOT NULL,
+  toolDomain    TEXT    NOT NULL,
+  version       TEXT    NOT NULL,
+  success       INTEGER NOT NULL,
+  durationMs    INTEGER NOT NULL,
+  executedAt    TEXT    NOT NULL,
+  errorCode     TEXT,
+  errorMsg      TEXT,
+  auditHash     TEXT    NOT NULL,
+  anchoredAt    TEXT,
+  anchorTxHash  TEXT
 )`.trim();
+
+const MIGRATE_ANCHOR_COLS_SQL = [
+  `ALTER TABLE tool_audit_log ADD COLUMN anchoredAt   TEXT`,
+  `ALTER TABLE tool_audit_log ADD COLUMN anchorTxHash TEXT`,
+];
 
 const INSERT_SQL = `
 INSERT INTO tool_audit_log
@@ -53,6 +60,13 @@ export class SqliteAuditWriter implements AuditWriter {
     this.db = new DatabaseSync(dbPath);
     this.db.exec('PRAGMA journal_mode = WAL');
     this.db.exec(CREATE_TABLE_SQL);
+    this._migrateAnchorColumns();
+  }
+
+  private _migrateAnchorColumns(): void {
+    for (const sql of MIGRATE_ANCHOR_COLS_SQL) {
+      try { this.db.exec(sql); } catch { /* column already exists */ }
+    }
   }
 
   async write(record: AuditRecord): Promise<void> {
@@ -86,6 +100,24 @@ export class SqliteAuditWriter implements AuditWriter {
       .all() as unknown as AuditRow[];
   }
 
+  /** 查詢尚未上鏈的記錄（anchoredAt IS NULL），依 id 升序 */
+  queryUnanchored(limit = 100): AuditRow[] {
+    return this.db
+      .prepare('SELECT * FROM tool_audit_log WHERE anchoredAt IS NULL ORDER BY id ASC LIMIT ?')
+      .all(limit) as unknown as AuditRow[];
+  }
+
+  /** 批次標記已上鏈：寫入 anchoredAt 與 anchorTxHash */
+  markAnchored(ids: number[], txHash: string): void {
+    const anchoredAt = new Date().toISOString();
+    const stmt = this.db.prepare(
+      'UPDATE tool_audit_log SET anchoredAt = ?, anchorTxHash = ? WHERE id = ?',
+    );
+    for (const id of ids) {
+      stmt.run(anchoredAt, txHash, id);
+    }
+  }
+
   close(): void {
     this.db.close();
   }
@@ -101,12 +133,14 @@ export interface AuditRow {
   toolName: string;
   toolDomain: string;
   version: string;
-  success: number;   // 0 | 1
+  success: number;        // 0 | 1
   durationMs: number;
   executedAt: string;
   errorCode: string | null;
   errorMsg: string | null;
   auditHash: string;
+  anchoredAt: string | null;    // ISO 8601，NULL 表示尚未上鏈
+  anchorTxHash: string | null;  // 區塊鏈 txHash，NULL 表示尚未上鏈
 }
 
 // ── verifyIntegrity ───────────────────────────────────────────────────────────

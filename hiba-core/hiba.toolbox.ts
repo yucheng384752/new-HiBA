@@ -21,6 +21,7 @@ import type {
   AuditWriter,
   HiBAErrorCode,
 } from './hiba.types';
+import { SqliteAuditWriter, verifyIntegrity } from './hiba.audit.sqlite';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 
@@ -95,6 +96,9 @@ export class MemoryAuditWriter implements AuditWriter {
 // ── HiBAToolbox ───────────────────────────────────────────────────────────────
 
 export class HiBAToolbox {
+  /** 已偵測到投毒的 traceId 集合，後續 execute() 呼叫將直接拒絕 */
+  private readonly blockedTraceIds = new Set<string>();
+
   constructor(private readonly auditWriter: AuditWriter = new MemoryAuditWriter()) {}
 
   /**
@@ -108,6 +112,17 @@ export class HiBAToolbox {
   ): Promise<ToolResult<T>> {
     const executedAt = new Date().toISOString();
     const t0 = Date.now();
+
+    // ── 0. Blocked trace check（AUDIT_ANCHOR_FAILED 後的防護）────────────────
+    if (this.blockedTraceIds.has(ctx.traceId)) {
+      return {
+        success: false,
+        errorCode: 'AUDIT_ANCHOR_FAILED' as const,
+        error: `TraceId ${ctx.traceId} is blocked: audit tampering detected`,
+        durationMs: 0,
+        executedAt,
+      };
+    }
 
     const fail = async (
       errorCode: HiBAErrorCode,
@@ -187,7 +202,7 @@ export class HiBAToolbox {
       )) as T;
     } catch (e) {
       const isTimeout = e instanceof Error && e.message === 'TOOL_TIMEOUT';
-      const code: HiBAErrorCode = isTimeout ? 'TOOL_TIMEOUT' : 'SCHEMA_VALIDATION_ERROR';
+      const code: HiBAErrorCode = isTimeout ? 'TOOL_TIMEOUT' : 'HANDLER_EXECUTION_FAILED';
       return fail(code, e instanceof Error ? e.message : String(e), def);
     }
 
@@ -208,6 +223,41 @@ export class HiBAToolbox {
     });
 
     return { success: true, output, auditHash, durationMs, executedAt };
+  }
+
+  /**
+   * 完整性驗證 + 上鏈流程（需傳入 SqliteAuditWriter 實例）：
+   *   1. verifyIntegrity() — 重算 auditHash，偵測投毒
+   *   2. 若有竄改 → blockedTraceIds 加入受影響 traceId，拋出 AUDIT_ANCHOR_FAILED
+   *   3. 若完整無誤 → 呼叫 orchestrator.anchorAuditBatch 上鏈
+   *
+   * 建議由排程器（例如每 N 次執行後）呼叫，而非在每次 execute() 內觸發。
+   */
+  async verifyAndAnchor(
+    sqliteWriter: SqliteAuditWriter,
+    ctx: ToolContext,
+  ): Promise<{ anchored: number; txHash: string | null }> {
+    const results = verifyIntegrity(sqliteWriter);
+    const tampered = results.filter(r => !r.ok);
+
+    if (tampered.length > 0) {
+      tampered.forEach(r => this.blockedTraceIds.add(r.traceId));
+      const err = Object.assign(
+        new Error(`AUDIT_ANCHOR_FAILED: ${tampered.length} tampered record(s)`),
+        { errorCode: 'AUDIT_ANCHOR_FAILED' as const, tampered },
+      );
+      throw err;
+    }
+
+    const result = await this.execute<{ anchored: number; txHash: string; skipped: number }>(
+      'orchestrator.anchorAuditBatch',
+      { limit: 50 },
+      ctx,
+    );
+    if (!result.success) {
+      throw new Error(`anchorAuditBatch failed: ${result.error}`);
+    }
+    return { anchored: result.output.anchored, txHash: result.output.txHash };
   }
 }
 

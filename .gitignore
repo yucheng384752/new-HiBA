@@ -21,9 +21,18 @@ Thumbs.db
 
 # Logs & DB
 *.log
+*.log.err
 *.db
 *.db-shm
 *.db-wal
+
+# Training model outputs (too large for git)
+*.gguf
+hiba-core/training/hiba-planner-lora/
+hiba-core/training/hiba-planner-merged/
+
+# Claude Code worktrees
+.claude/worktrees/
 
 # Not HiBA-related
 swagger-cli.ts

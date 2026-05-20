@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(curl -s --connect-timeout 5 http://192.168.50.140:3000/health)",
+      "Bash(echo \"EXIT:$?\")",
+      "Bash(ping -n 2 192.168.50.140)",
+      "Bash(curl -sv --connect-timeout 5 http://192.168.50.140:3000/health)",
+      "Bash(curl -sv --connect-timeout 5 http://192.168.50.140:8080/health)",
+      "Bash(curl -sv --connect-timeout 5 http://192.168.50.140:5000/health)",
+      "Bash(curl -sv --connect-timeout 5 http://192.168.50.140:80/)",
+      "Bash(ssh -o ConnectTimeout=5 -o BatchMode=yes pi@192.168.50.140 \"systemctl status hiba-subweb 2>&1; echo STATUS:$?\")",
+      "Bash(ssh -o ConnectTimeout=5 -o BatchMode=yes -o StrictHostKeyChecking=no pi@192.168.50.140 \"systemctl is-active hiba-subweb; node --version 2>/dev/null\")",
+      "Bash(ls c:/Users/yucheng/Desktop/files/scripts_pi/*.py)",
+      "Bash(python script_1.py '{\"orderId\":\"WO-2026-001\",\"quantity\":50}')",
+      "Bash(python script_2.py '{\"machineId\":\"CNC-01\"}')",
+      "Bash(python script_3.py '{\"sensorId\":\"sensor-03\"}')",
+      "Bash(git add *)"
+    ]
+  }
+}

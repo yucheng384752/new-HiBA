@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { defineTool } from './core/defineTool';
 import { HiBAToolbox } from './core/HiBAToolbox';
 import { AuditTrail } from './audit/AuditTrail';
-import type { ToolContext } from '../../../hiba.types';
+import type { ToolContext } from './types/hiba.types';
 
 async function main() {
   const auditTrail = new AuditTrail(':memory:');

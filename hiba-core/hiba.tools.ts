@@ -642,26 +642,5 @@ defineTool({
   handler: notImplemented,
 });
 
-defineTool({
-  name: 'orchestrator.getAuditSummary',
-  version: '1.0.0',
-  tags: ['orchestrator', 'read'],
-  description: '取得指定時間區間的 AuditTrail 摘要統計',
-  inputSchema: z.object({
-    timeRange: timeRangeSchema,
-  }),
-  outputSchema: z.object({
-    timeRange: timeRangeSchema,
-    totalExecutions: z.number().describe('總執行次數'),
-    successCount: z.number().describe('成功次數'),
-    failureCount: z.number().describe('失敗次數'),
-    topTools: z.array(z.object({
-      toolName: z.string(),
-      count: z.number(),
-    })).describe('最常用 Tool 排行（Top 10）'),
-    anchored: z.number().describe('已上鏈稽核記錄數'),
-  }),
-  permissions: ['orchestrator.read'],
-  timeout: 15_000,
-  handler: notImplemented,
-});
+// orchestrator.getAuditSummary 已移至 hiba.audit.tools.ts（需要 SqliteAuditWriter 實例）
+// 由應用程式入口呼叫 registerAuditTools(writer) 注冊。

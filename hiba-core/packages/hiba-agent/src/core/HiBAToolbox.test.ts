@@ -7,7 +7,7 @@ import type {
   AuditWriter,
   HiBAErrorCode,
   ToolContext,
-} from '../../../../hiba.types';
+} from '../types/hiba.types';
 
 const baseCtx: ToolContext = {
   hibaBaseUrl: 'http://localhost:8080',

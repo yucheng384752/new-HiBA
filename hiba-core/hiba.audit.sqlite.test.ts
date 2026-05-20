@@ -17,7 +17,13 @@ import assert from 'node:assert/strict';
 import { z } from 'zod';
 import { SqliteAuditWriter, verifyIntegrity } from './hiba.audit.sqlite';
 import { defineTool, HiBAToolbox } from './hiba.toolbox';
+import { registerAuditTools } from './hiba.audit.tools';
 import type { AuditRecord, ToolContext } from './hiba.types';
+
+// 注冊 audit orchestrator tools（一次即可）
+// sharedAuditWriter 供 orchestrator.* tools 的 handler 讀取（工具閉包與此實例綁定）
+const sharedAuditWriter = new SqliteAuditWriter(':memory:');
+registerAuditTools(sharedAuditWriter);
 
 // ── Fixture ───────────────────────────────────────────────────────────────────
 
@@ -43,7 +49,7 @@ const baseCtx: ToolContext = {
   traceId:     'trace-sqlite-test-001',
   agentId:     'test-agent',
   depth:       1,
-  permissions: ['material.write'],
+  permissions: ['material.write', 'orchestrator.read', 'orchestrator.write'],
 };
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -151,6 +157,99 @@ test('verifyIntegrity() detects tampered auditHash — C2 投毒偵測', async (
   assert.equal(results.length, 1);
   assert.equal(results[0]!.ok, false, 'tampered auditHash should fail integrity check');
   assert.notEqual(results[0]!.storedHash, results[0]!.computedHash);
+
+  writer.close();
+});
+
+test('queryUnanchored() 只回傳 anchoredAt IS NULL 的記錄', async () => {
+  const writer = new SqliteAuditWriter(':memory:');
+
+  await writer.write(makeRecord({ traceId: 'trace-A' }));
+  await writer.write(makeRecord({ traceId: 'trace-B' }));
+
+  // 標記 trace-A 已上鏈
+  const all = writer.queryAll();
+  writer.markAnchored([all[0]!.id], '0xdeadbeef');
+
+  const unanchored = writer.queryUnanchored();
+  assert.equal(unanchored.length, 1);
+  assert.equal(unanchored[0]!.traceId, 'trace-B');
+  assert.equal(unanchored[0]!.anchoredAt, null);
+
+  writer.close();
+});
+
+test('markAnchored() 正確寫入 anchoredAt 與 anchorTxHash', async () => {
+  const writer = new SqliteAuditWriter(':memory:');
+
+  await writer.write(makeRecord({ traceId: 'trace-mark' }));
+  const id = writer.queryAll()[0]!.id;
+  const txHash = '0xabc123';
+
+  writer.markAnchored([id], txHash);
+
+  const row = writer.queryAll()[0]!;
+  assert.ok(row.anchoredAt !== null, 'anchoredAt should be set');
+  assert.equal(row.anchorTxHash, txHash);
+
+  // 已上鏈後不再出現在 queryUnanchored
+  assert.equal(writer.queryUnanchored().length, 0);
+
+  writer.close();
+});
+
+test('orchestrator.verifyAuditIntegrity：完整記錄回傳 tamperedCount=0', async () => {
+  const writer = new SqliteAuditWriter(':memory:');
+  const toolbox = new HiBAToolbox(writer);
+
+  await toolbox.execute('material.integrityTest', { filePath: '/tmp/ok.txt' }, baseCtx);
+
+  const result = await toolbox.execute<{ tamperedCount: number; tampered: unknown[] }>(
+    'orchestrator.verifyAuditIntegrity', {}, baseCtx,
+  );
+  assert.ok(result.success);
+  if (result.success) {
+    assert.equal(result.output.tamperedCount, 0);
+    assert.equal(result.output.tampered.length, 0);
+  }
+
+  writer.close();
+});
+
+test('orchestrator.verifyAuditIntegrity：竄改記錄拋出 AUDIT_ANCHOR_FAILED', async () => {
+  // 寫入偽造 auditHash 至 sharedAuditWriter（tool handler 讀取的同一實例）
+  await sharedAuditWriter.write(makeRecord({ traceId: 'trace-tampered', auditHash: 'deadbeef'.repeat(8) }));
+
+  const toolbox = new HiBAToolbox(sharedAuditWriter);
+  const result = await toolbox.execute('orchestrator.verifyAuditIntegrity', {}, baseCtx);
+  assert.ok(!result.success);
+  if (!result.success) {
+    assert.equal(result.errorCode, 'HANDLER_EXECUTION_FAILED');
+  }
+});
+
+test('verifyAndAnchor()：竄改記錄 → blockedTraceIds 阻擋後續執行', async () => {
+  const writer = new SqliteAuditWriter(':memory:');
+  const toolbox = new HiBAToolbox(writer);
+
+  // 插入已竄改記錄
+  await writer.write(makeRecord({ traceId: 'trace-blocked', auditHash: 'bad'.padEnd(64, '0') }));
+
+  await assert.rejects(
+    () => toolbox.verifyAndAnchor(writer, baseCtx),
+    /AUDIT_ANCHOR_FAILED/,
+  );
+
+  // 同一 traceId 的後續 execute 應被 block
+  const blocked = await toolbox.execute(
+    'material.integrityTest',
+    { filePath: '/tmp/x.txt' },
+    { ...baseCtx, traceId: 'trace-blocked' },
+  );
+  assert.ok(!blocked.success);
+  if (!blocked.success) {
+    assert.equal(blocked.errorCode, 'AUDIT_ANCHOR_FAILED');
+  }
 
   writer.close();
 });

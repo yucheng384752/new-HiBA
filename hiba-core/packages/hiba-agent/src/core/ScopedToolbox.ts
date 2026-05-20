@@ -3,7 +3,7 @@ import type {
   ToolContext,
   ToolName,
   ToolResult,
-} from '../../../../hiba.types';
+} from '../types/hiba.types';
 import { HiBAToolbox } from './HiBAToolbox';
 
 export class HiBAError extends Error {

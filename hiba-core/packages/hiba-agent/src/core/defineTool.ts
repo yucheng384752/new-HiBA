@@ -6,7 +6,7 @@ import type {
   ToolDomain,
   ToolName,
   HiBAErrorCode,
-} from '../../../../hiba.types';
+} from '../types/hiba.types';
 
 export type RegisteredTool<
   TInput extends z.ZodType = z.ZodType,

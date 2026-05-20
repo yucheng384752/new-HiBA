@@ -4,8 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const ACCOUNTING_URL = process.env.ACCOUNTING_URL || 'http://localhost:9090';
+const ANNOTATOR = process.env.ANNOTATOR || 'claude';
 const ANTHROPIC_MODEL = 'claude-sonnet-4-6';
 const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile';
+const GROQ_API_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const SYSTEM_PROMPT = '你是 HiBA 工作流程規劃師，根據節點資源清單將使用者的繁體中文任務拆解成 ExecutionPlan JSON。只回傳純 JSON，不加任何說明。';
 
 const MATERIALS = [
@@ -49,6 +52,9 @@ const FORMATS = ['JSON', 'CSV', 'XLSX', 'PDF', 'Parquet', 'Markdown', 'HTML', 'S
 const THRESHOLDS = ['0.75', '0.8', '0.85', '0.9', '95', '100', '120', '150'];
 const WEIGHTS = ['1kg', '2.5kg', '5kg', '8kg', '10kg', '15kg', '20kg', '25kg'];
 const QUANTITIES = ['10', '20', '30', '50', '80', '100', '150', '200'];
+const GROQ_RATE_LIMIT_RETRIES = 5;
+const GROQ_RATE_LIMIT_BACKOFF_MS = 1000;
+const GROQ_SUCCESS_DELAY_MS = 500;
 
 const TASK_TEMPLATES = [
   '請在 {nodeId} 使用 {script} 處理 {quantity} 件 {material}，重量上限 {weight}，結果輸出成 {format}。',
@@ -92,6 +98,10 @@ const TASK_TEMPLATES = [
   '請把 {material} 的事件資料依 {threshold} 分級，並輸出 {format} 給 {target}。',
   '安排 {nodeId} 對 {material} 做批次壓縮，來源 {source}，目標 {target}，格式 {format}。',
 ];
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 async function loadZod() {
   try {
@@ -278,10 +288,71 @@ async function annotateWithClaude({ instruction, resources, apiKey }) {
   return JSON.parse(extractJson(text));
 }
 
+async function annotateWithGroq({ instruction, resources, apiKey }) {
+  const userPrompt = [
+    '節點資源清單 JSON:',
+    JSON.stringify(resources),
+    '',
+    '使用者任務:',
+    instruction,
+    '',
+    '請回傳符合此 TypeScript 型別的純 JSON:',
+    '{"steps":[{"nodeId":"string","tool":"string","script":"string","args":{}}],"supervisorPolicy":"fail-fast|partial-success"}',
+  ].join('\n');
+
+  let response;
+  for (let attempt = 0; attempt <= GROQ_RATE_LIMIT_RETRIES; attempt += 1) {
+    response = await fetch(GROQ_API_URL, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        max_tokens: 1200,
+        temperature: 0.2,
+        messages: [
+          { role: 'system', content: SYSTEM_PROMPT },
+          { role: 'user', content: userPrompt },
+        ],
+      }),
+    });
+
+    if (response.status !== 429 || attempt === GROQ_RATE_LIMIT_RETRIES) {
+      break;
+    }
+
+    const retryAfter = Number(response.headers.get('retry-after'));
+    const delayMs = Number.isFinite(retryAfter) && retryAfter > 0
+      ? retryAfter * 1000
+      : GROQ_RATE_LIMIT_BACKOFF_MS * (2 ** attempt);
+    await sleep(delayMs);
+  }
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => '');
+    throw new Error(`Groq API failed: HTTP ${response.status}${body ? ` ${body}` : ''}`);
+  }
+
+  const data = await response.json();
+  const text = data?.choices?.[0]?.message?.content;
+  if (typeof text !== 'string' || !text.trim()) throw new Error('Groq API returned no text content');
+  return JSON.parse(extractJson(text));
+}
+
 async function main() {
   const { out, count } = parseArgs(process.argv.slice(2));
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY env var is required');
+  if (!['claude', 'groq'].includes(ANNOTATOR)) {
+    throw new Error("ANNOTATOR env var must be 'claude' or 'groq'");
+  }
+
+  const model = ANNOTATOR === 'groq' ? GROQ_MODEL : ANTHROPIC_MODEL;
+  console.log(`[gen] annotator: ${ANNOTATOR} (${model})`);
+
+  const apiKey = ANNOTATOR === 'groq' ? process.env.GROQ_API_KEY : process.env.ANTHROPIC_API_KEY;
+  if (ANNOTATOR === 'groq' && !apiKey) throw new Error('GROQ_API_KEY env var is required when ANNOTATOR=groq');
+  if (ANNOTATOR === 'claude' && !apiKey) throw new Error('ANTHROPIC_API_KEY env var is required when ANNOTATOR=claude');
 
   const validatePlan = createPlanValidator(await loadZod());
   const resources = await fetchResources();
@@ -291,15 +362,25 @@ async function main() {
   const stream = fs.createWriteStream(outPath, { flags: 'w', encoding: 'utf8' });
   let successful = 0;
   let skipped = 0;
+  let highSkipRateWarningPrinted = false;
 
   try {
     while (successful < count) {
       const instruction = buildInstruction(resources);
       try {
-        const plan = await annotateWithClaude({ instruction, resources, apiKey });
+        const plan = ANNOTATOR === 'groq'
+          ? await annotateWithGroq({ instruction, resources, apiKey })
+          : await annotateWithClaude({ instruction, resources, apiKey });
+        if (ANNOTATOR === 'groq') {
+          await sleep(GROQ_SUCCESS_DELAY_MS);
+        }
         const validation = validatePlan(plan);
         if (!validation.success) {
           skipped += 1;
+          if (skipped > count && !highSkipRateWarningPrinted) {
+            console.warn('[gen] warning: high skip rate; continuing');
+            highSkipRateWarningPrinted = true;
+          }
           continue;
         }
 
@@ -316,6 +397,10 @@ async function main() {
         }
       } catch {
         skipped += 1;
+        if (skipped > count && !highSkipRateWarningPrinted) {
+          console.warn('[gen] warning: high skip rate; continuing');
+          highSkipRateWarningPrinted = true;
+        }
       }
     }
   } finally {

@@ -1,0 +1,7 @@
+FROM C:/Users/gslab/Desktop/files/hiba-core/training/hiba-planner.gguf
+
+SYSTEM "你是 HiBA 工作流程規劃師。根據節點資源清單，將使用者的繁體中文任務拆解成 ExecutionPlan JSON。只回傳純 JSON，不加任何說明。"
+
+PARAMETER temperature 0.1
+PARAMETER top_p 0.9
+PARAMETER stop "<|eot_id|>"

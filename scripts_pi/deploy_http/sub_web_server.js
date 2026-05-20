@@ -33,6 +33,15 @@ try {
 const app        = express();
 app.use(express.json());
 
+// CORS: allow requests from file:// and any origin (dashboard runs as local HTML)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Trace-Id, X-Agent-Id, X-Depth');
+  if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
+  next();
+});
+
 const NODE_ID    = process.env.NODE_ID    ?? 'unknown';
 const SCRIPTS_DIR = path.resolve(process.env.SCRIPTS_DIR ?? path.join(__dirname, 'scripts'));
 const PORT       = parseInt(process.env.PORT ?? '3000');
@@ -58,6 +67,8 @@ try {
 }
 /** @type {Map<string, object>} scriptName → manifest entry */
 const scriptMap = new Map(manifest.map(s => [s.name, s]));
+/** @type {Map<string, string>} toolName → scriptName */
+const toolNameToScript = new Map(manifest.map(s => [s.toolName, s.name]));
 
 // ── ① AuditTrail SQLite ──────────────────────────────────────────
 let db = null;
@@ -165,45 +176,26 @@ app.get('/scripts', (_req, res) => {
   res.json({ nodeId: NODE_ID, scripts: manifest });
 });
 
-// POST /execute
-app.post('/execute', (req, res) => {
-  const { scriptName, params = {} } = req.body ?? {};
-  const traceId = String(req.headers['x-trace-id'] ?? 'no-trace');
-  const agentId = String(req.headers['x-agent-id'] ?? 'unknown');
-  const depth   = Number(req.headers['x-depth']   ?? 0);
-
+// ── 核心執行邏輯（/execute 與 /api/execute 共用）──────────────────
+/**
+ * @param {object} meta      manifest entry（已驗證存在）
+ * @param {object} params    輸入參數（已通過 schema 驗證）
+ * @param {string} traceId
+ * @param {string} agentId
+ * @param {number} depth
+ * @param {import('express').Response} res
+ */
+function doExecute(meta, params, traceId, agentId, depth, res) {
+  const scriptName = meta.name;
   console.log(`[${traceId}] Execute: ${scriptName}`, params);
-
-  // [工具化①] 腳本存在檢查
-  const meta = scriptMap.get(scriptName);
-  if (!meta) {
-    return res.status(404).json({
-      success:   false,
-      error:     'TOOL_NOT_FOUND',
-      scriptName,
-    });
-  }
-
-  // [工具化①] Schema 驗證
-  const validationErrors = validateInput(params, meta.inputSchema);
-  if (validationErrors.length > 0) {
-    return res.status(400).json({
-      success:    false,
-      error:      'SCHEMA_VALIDATION_ERROR',
-      scriptName,
-      toolName:   meta.toolName,
-      violations: validationErrors,
-    });
-  }
 
   const scriptPath = path.join(SCRIPTS_DIR, `${scriptName}.py`);
   if (!fs.existsSync(scriptPath)) {
     return res.status(404).json({ success: false, error: 'TOOL_NOT_FOUND', scriptName });
   }
 
-  // [工具化③] Timeout 來自 manifest
-  const timeoutMs = meta.timeout ?? 10000;
-  const startMs   = Date.now();
+  const timeoutMs  = meta.timeout ?? 10000;
+  const startMs    = Date.now();
   const executedAt = new Date().toISOString();
 
   execFile(
@@ -213,12 +205,9 @@ app.post('/execute', (req, res) => {
     (err, stdout, stderr) => {
       const durationMs = Date.now() - startMs;
 
-      // 腳本 crash 或 timeout
       if (err) {
         const isTimeout = err.killed || err.signal === 'SIGTERM';
         const errCode   = isTimeout ? 'TOOL_TIMEOUT' : 'EXECUTION_ERROR';
-
-        // [工具化②] AuditTrail 錨定（失敗也要錨）
         const auditHash = anchorResult({
           traceId, agentId, depth,
           toolName:   meta.toolName   ?? scriptName,
@@ -227,30 +216,22 @@ app.post('/execute', (req, res) => {
           success: false, durationMs, executedAt,
           errorMsg: errCode,
         });
-
         return res.status(500).json({
           success: false, error: errCode, scriptName,
           stderr: stderr || err.message, durationMs, auditHash,
         });
       }
 
-      // 解析 stdout
       let output;
-      try {
-        output = JSON.parse(stdout);
-      } catch {
-        output = { raw: stdout };
-      }
+      try { output = JSON.parse(stdout); }
+      catch { output = { raw: stdout }; }
 
-      // Phase hints
       const hints = [];
       if (output.transferOk === false) hints.push('空檔傳輸失敗（probe phase）');
       if (output.written    === false) hints.push('內容寫入失敗（write phase）');
       if (output.matched    === false) hints.push('回讀內容不一致（verify phase）');
 
       const ok = output.success !== false;
-
-      // [工具化②] AuditTrail 錨定
       const auditHash = anchorResult({
         traceId, agentId, depth,
         toolName:   String(output.toolName  ?? meta.toolName   ?? scriptName),
@@ -268,6 +249,55 @@ app.post('/execute', (req, res) => {
       });
     }
   );
+}
+
+// POST /execute — 原始格式（scriptName + params）
+app.post('/execute', (req, res) => {
+  const { scriptName, params = {} } = req.body ?? {};
+  const traceId = String(req.headers['x-trace-id'] ?? 'no-trace');
+  const agentId = String(req.headers['x-agent-id'] ?? 'unknown');
+  const depth   = Number(req.headers['x-depth']   ?? 0);
+
+  const meta = scriptMap.get(scriptName);
+  if (!meta) {
+    return res.status(404).json({ success: false, error: 'TOOL_NOT_FOUND', scriptName });
+  }
+  const validationErrors = validateInput(params, meta.inputSchema);
+  if (validationErrors.length > 0) {
+    return res.status(400).json({
+      success: false, error: 'SCHEMA_VALIDATION_ERROR',
+      scriptName, toolName: meta.toolName, violations: validationErrors,
+    });
+  }
+  doExecute(meta, params, traceId, agentId, depth, res);
+});
+
+// POST /api/execute — AgentServer/OrchestratorRunner 格式（toolName + input）
+app.post('/api/execute', (req, res) => {
+  const { toolName, input = {} } = req.body ?? {};
+  const traceId = String(req.headers['x-trace-id'] ?? 'no-trace');
+  const agentId = String(req.headers['x-agent-id'] ?? 'unknown');
+  const depth   = Number(req.headers['x-depth']   ?? 0);
+
+  if (!toolName) {
+    return res.status(400).json({ success: false, errorCode: 'MISSING_TOOL_NAME' });
+  }
+  const scriptName = toolNameToScript.get(toolName);
+  const meta = scriptName ? scriptMap.get(scriptName) : null;
+  if (!meta) {
+    return res.status(404).json({
+      success: false, errorCode: 'TOOL_NOT_FOUND',
+      error: `No script registered for toolName '${toolName}'`,
+    });
+  }
+  const validationErrors = validateInput(input, meta.inputSchema);
+  if (validationErrors.length > 0) {
+    return res.status(400).json({
+      success: false, errorCode: 'SCHEMA_VALIDATION_ERROR',
+      toolName, scriptName: meta.name, violations: validationErrors,
+    });
+  }
+  doExecute(meta, input, traceId, agentId, depth, res);
 });
 
 // ── /deploy 端點 ──────────────────────────────────────────────────

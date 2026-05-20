@@ -1,0 +1,22 @@
+[Unit]
+Description=HiBA-AB MQTT Edge Agent Runner
+Documentation=https://github.com/anthropics/hiba-ab
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/agent/env
+ExecStart=/usr/bin/python3 /opt/agent/runner.py
+WorkingDirectory=/opt/agent
+Restart=always
+RestartSec=5
+StandardOutput=append:/opt/hiba/logs/agent-runner.log
+StandardError=append:/opt/hiba/logs/agent-runner-err.log
+
+# 資源限制（防止失控 WASM 任務耗盡系統資源）
+MemoryMax=256M
+CPUQuota=80%
+
+[Install]
+WantedBy=multi-user.target

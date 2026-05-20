@@ -5,6 +5,7 @@
   "type": "commonjs",
   "scripts": {
     "start": "ts-node src/server/start.ts",
+    "start:env": "node --env-file=.env --require ts-node/register src/server/start.ts",
     "test": "jest --runInBand",
     "typecheck": "tsc --noEmit"
   },
