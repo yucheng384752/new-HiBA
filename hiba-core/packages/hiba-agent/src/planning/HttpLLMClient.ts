@@ -114,8 +114,7 @@ function buildDefaultSystemPrompt(
   const toolBlock = tools.length
     ? tools.map(tool => [
         `  - ${tool.name}@${tool.version}: ${tool.description}`,
-        `    inputSchema: ${JSON.stringify(tool.inputSchema)}`,
-        `    outputSchema: ${JSON.stringify(tool.outputSchema)}`,
+        `    input: ${summarizeInputSchema(tool.inputSchema)}`,
       ].join('\n')).join('\n')
     : '  (no tools registered)';
 
@@ -155,4 +154,32 @@ ${toolBlock}
 5. input must validate against the tool's inputSchema; never invent parameter names
 6. protocolVersion must be "1.0"
 7. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
+}
+
+/**
+ * Renders a tool's inputSchema (full zod-to-json-schema output) as one compact
+ * line instead of dumping the raw JSON schema. The raw form repeats `$schema`,
+ * `additionalProperties`, and nested `type` wrappers for every property on every
+ * tool, which was blowing the prompt past the local LLM's 4096-token context
+ * window (36 registered tools × input+output schema ≈ 8.4k tokens). The LLM
+ * only needs field name / type / required / description to fill `input` — it
+ * never reads outputSchema, so that block is dropped entirely (see caller).
+ */
+export function summarizeInputSchema(schema: Record<string, unknown>): string {
+  const properties = schema['properties'];
+  if (!properties || typeof properties !== 'object') return '(no parameters)';
+
+  const required = new Set(
+    Array.isArray(schema['required']) ? (schema['required'] as unknown[]).filter((r): r is string => typeof r === 'string') : [],
+  );
+
+  const fields = Object.entries(properties as Record<string, unknown>).map(([name, propRaw]) => {
+    const prop = (propRaw && typeof propRaw === 'object') ? propRaw as Record<string, unknown> : {};
+    const type = typeof prop['type'] === 'string' ? prop['type'] : 'any';
+    const desc = typeof prop['description'] === 'string' ? ` — ${prop['description']}` : '';
+    const req  = required.has(name) ? 'required' : 'optional';
+    return `${name}: ${type} (${req})${desc}`;
+  });
+
+  return fields.length ? fields.join('; ') : '(no parameters)';
 }
