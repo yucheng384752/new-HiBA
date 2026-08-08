@@ -105,6 +105,62 @@ export function registerAuditTools(toolbox: HiBAToolbox, audit: AuditTrail): voi
     },
   });
 
+  const anchorAuditBatch = defineTool({
+    name: 'orchestrator.anchorAuditBatch',
+    version: '1.0.0',
+    tags: ['orchestrator', 'write'],
+    description: 'Anchor unanchored audit records through POST /api/audit/anchor and persist the returned txHash.',
+    inputSchema: z.object({
+      limit: z.number().int().min(1).max(1000).default(100),
+    }),
+    outputSchema: z.object({
+      anchored: z.number(),
+      txHash: z.string().nullable(),
+      skipped: z.number(),
+    }),
+    permissions: ['orchestrator.write'],
+    timeout: 30_000,
+    handler: async (input, ctx) => {
+      const records = audit.queryUnanchored(input.limit);
+      const events = audit.queryUnanchoredEvents(input.limit);
+      const pending = [...records, ...events];
+      if (pending.length === 0) {
+        return { anchored: 0, txHash: null, skipped: 0 };
+      }
+
+      const response = await fetch(`${ctx.hibaBaseUrl}/api/audit/anchor`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Trace-Id': ctx.traceId,
+          'X-Agent-Id': ctx.agentId,
+          'X-Depth': String(ctx.depth),
+        },
+        body: JSON.stringify({ records: pending }),
+      });
+
+      if (!response.ok) {
+        throw Object.assign(
+          new Error(`AUDIT_ANCHOR_FAILED: HTTP ${response.status} from /api/audit/anchor`),
+          { errorCode: 'AUDIT_ANCHOR_FAILED' },
+        );
+      }
+
+      const data = await response.json() as { txHash?: string };
+      if (!data.txHash) {
+        throw Object.assign(
+          new Error('AUDIT_ANCHOR_FAILED: /api/audit/anchor did not return txHash'),
+          { errorCode: 'AUDIT_ANCHOR_FAILED' },
+        );
+      }
+
+      audit.markAnchored(records.map(r => r.auditHash), data.txHash);
+      audit.markEventsAnchored(events.map(event => event.eventHash), data.txHash);
+      return { anchored: pending.length, txHash: data.txHash, skipped: 0 };
+    },
+  });
+
   toolbox.register(verifyAuditIntegrity);
   toolbox.register(getAuditSummary);
+  toolbox.register(anchorAuditBatch);
 }

@@ -1,3 +1,4 @@
+import type { NodeDescriptor } from '../types/hiba.types';
 import type { AccountingClient, NodeResourceMap, ResourceItem } from './NLPlanningService';
 
 export interface HttpAccountingClientOptions {
@@ -37,5 +38,14 @@ export class HttpAccountingClient implements AccountingClient {
     );
     if (!res.ok) throw new Error(`Accounting server ${this.baseUrl} → HTTP ${res.status}`);
     return res.json() as Promise<ResourceItem[]>;
+  }
+
+  async listNodes(): Promise<NodeDescriptor[]> {
+    const res = await fetch(`${this.baseUrl}/api/nodes`, {
+      headers: this.options.headers,
+      signal: AbortSignal.timeout(this.options.timeoutMs ?? 8_000),
+    });
+    if (!res.ok) throw new Error(`Accounting server ${this.baseUrl} → HTTP ${res.status}`);
+    return res.json() as Promise<NodeDescriptor[]>;
   }
 }

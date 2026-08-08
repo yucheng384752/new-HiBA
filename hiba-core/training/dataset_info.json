@@ -1,6 +1,6 @@
 {
-  "hiba_workflow": {
-    "file_name": "../dataset-train.jsonl",
+  "hiba_workflow_v1": {
+    "file_name": "data/hiba-v1-train.jsonl",
     "formatting": "alpaca",
     "columns": {
       "prompt": "instruction",

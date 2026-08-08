@@ -14,7 +14,12 @@
       "Bash(python script_1.py '{\"orderId\":\"WO-2026-001\",\"quantity\":50}')",
       "Bash(python script_2.py '{\"machineId\":\"CNC-01\"}')",
       "Bash(python script_3.py '{\"sensorId\":\"sensor-03\"}')",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git rm *)",
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)",
+      "Bash(git config *)",
+      "Bash(Test-Path \"c:\\\\Users\\\\gslab\\\\Desktop\\\\files\\\\hiba-core\\\\training\\\\README.md\")"
     ]
   }
 }

@@ -20,6 +20,10 @@ set -euo pipefail
 
 NODE_ID="${1:-m1}"
 CLAW_URL="${2:-http://192.168.1.100:8080}"
+CLAW_HOST="$(printf '%s' "${CLAW_URL}" | sed -E 's#^(https?://[^/:]+).*#\1#')"
+ACCOUNTING_URL="${3:-${CLAW_HOST}:9090}"
+SELF_IP="$(hostname -I | awk '{print $1}')"
+AGENT_URL="http://${SELF_IP}:3000"
 
 HIBA_ROOT="/opt/hiba"
 SUBWEB_DIR="${HIBA_ROOT}/subweb"
@@ -48,7 +52,8 @@ echo "[2/9] 安裝基礎套件..."
 apt-get install -y -q \
   curl wget git jq sqlite3 \
   python3 python3-pip python3-venv \
-  tpm2-tools openssl
+  tpm2-tools openssl \
+  swtpm swtpm-tools
 
 # ── 3. 安裝 Node.js 20 (NodeSource，無衝突) ───────────────
 # 必須先移除 Raspberry Pi OS 內建版本，避免版本互斥
@@ -139,6 +144,8 @@ echo "[6/9] 寫入 .env..."
 cat > "${SUBWEB_DIR}/.env" <<EOF
 NODE_ID=${NODE_ID}
 CLAW_URL=${CLAW_URL}
+ACCOUNTING_URL=${ACCOUNTING_URL}
+AGENT_URL=${AGENT_URL}
 SCRIPTS_DIR=${SCRIPTS_DIR}
 DATA_DIR=${DATA_DIR}
 AUDIT_DB=${SUBWEB_DIR}/audit_trail.db
@@ -193,7 +200,6 @@ else
 fi
 
 echo ""
-SELF_IP=$(hostname -I | awk '{print $1}')
 SELF_URL="http://${SELF_IP}:3000"
 echo "  節點 URL：${SELF_URL}"
 echo "  ⓘ 節點登錄請至 Claw Dashboard → Add Node 輸入上方 URL"

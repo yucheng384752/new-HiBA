@@ -1,5 +1,19 @@
 import { z } from 'zod';
-import type { ExecutionPlan, PlanStep, ToolContext, ToolName } from '../types/hiba.types';
+import type { RegisteredTool } from '../core/defineTool';
+import { toToolSpec } from '../core/defineTool';
+import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
+import type {
+  ExecutionPlan,
+  NodeDescriptor,
+  NodeResourceMap,
+  PlanStep,
+  ResourceItem,
+  ToolContext,
+  ToolSpec,
+} from '../types/hiba.types';
+import { validatePlan } from './validatePlan';
+
+export type { NodeResourceMap, ResourceItem } from '../types/hiba.types';
 
 // ── Pluggable Interfaces ───────────────────────────────────────────────────────
 // Both interfaces are minimal — swap any implementation without touching the service.
@@ -7,7 +21,8 @@ import type { ExecutionPlan, PlanStep, ToolContext, ToolName } from '../types/hi
 export interface LLMPayload {
   task: string;
   resources: NodeResourceMap;
-  availableTools: string[];
+  nodes: NodeDescriptor[];
+  tools: ToolSpec[];
   /** Override to inject a custom system prompt at call time */
   systemPrompt?: string;
 }
@@ -16,20 +31,10 @@ export interface LLMClient {
   complete(payload: LLMPayload): Promise<{ rawJson: unknown }>;
 }
 
-export interface ResourceItem {
-  name: string;
-  type: string;          // 'script' | 'model' | 'dataset' | ...
-  version?: string;
-  path?: string;
-  metadata?: Record<string, unknown>;
-}
-
-/** nodeId → list of resources on that node */
-export type NodeResourceMap = Record<string, ResourceItem[]>;
-
 export interface AccountingClient {
   listNodeResources(): Promise<NodeResourceMap>;
   getNodeResources(nodeId: string): Promise<ResourceItem[]>;
+  listNodes(): Promise<NodeDescriptor[]>;
 }
 
 // ── Zod Runtime Validation ────────────────────────────────────────────────────
@@ -44,9 +49,25 @@ const planStepSchema = z.object({
 });
 
 const executionPlanSchema = z.object({
+  protocolVersion:  z.literal(HIBA_PROTOCOL_VERSION).default(HIBA_PROTOCOL_VERSION),
   steps:            z.array(planStepSchema),
   supervisorPolicy: z.enum(['fail-fast', 'partial-success']).default('fail-fast'),
   error:            z.string().optional(),
+}).superRefine((plan, ctx) => {
+  const ids = new Set<string>();
+  for (const step of plan.steps) {
+    if (ids.has(step.stepId)) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Duplicate stepId '${step.stepId}'` });
+    }
+    ids.add(step.stepId);
+  }
+  for (const step of plan.steps) {
+    for (const dependency of step.dependsOn) {
+      if (!ids.has(dependency)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Unknown dependency '${dependency}' in '${step.stepId}'` });
+      }
+    }
+  }
 });
 
 // ── NLPlanningService ─────────────────────────────────────────────────────────
@@ -55,7 +76,7 @@ export interface NLPlanningOptions {
   /** Fallback supervisorPolicy when LLM omits it */
   supervisorPolicy?: 'fail-fast' | 'partial-success';
   /** If provided, tool names are included in LLM context */
-  toolbox?: { list(): Array<{ name: string }> };
+  toolbox?: { list(): RegisteredTool[] };
 }
 
 export class NLPlanningService {
@@ -66,18 +87,35 @@ export class NLPlanningService {
   ) {}
 
   async plan(task: string, _ctx: ToolContext): Promise<ExecutionPlan> {
-    const resources = await this.accounting.listNodeResources();
-    const availableTools = this.options.toolbox
-      ? this.options.toolbox.list().map(t => t.name)
-      : [];
+    const [resources, nodes] = await Promise.all([
+      this.accounting.listNodeResources(),
+      this.accounting.listNodes(),
+    ]);
+    const registeredTools = this.options.toolbox?.list() ?? [];
+    const tools = registeredTools.map(toToolSpec);
 
-    const { rawJson } = await this.llm.complete({ task, resources, availableTools });
-    return this.parsePlan(rawJson);
+    const { rawJson } = await this.llm.complete({ task, resources, nodes, tools });
+    const plan = this.parsePlan(rawJson);
+    if (plan.error || !this.options.toolbox) return plan;
+
+    const validation = validatePlan(plan, { tools: registeredTools, nodes });
+    if (validation.valid) return validation.plan;
+    return {
+      ...plan,
+      steps: [],
+      error: `Plan validation failed: ${validation.issues.map(issue => issue.message).join('; ')}`,
+      validationIssues: validation.issues,
+      missingInputs: validation.missingInputs,
+    };
   }
 
   /** Expose resource map for AgentServer /api/resources proxy */
   async getResources(): Promise<NodeResourceMap> {
     return this.accounting.listNodeResources();
+  }
+
+  async getNodes(): Promise<NodeDescriptor[]> {
+    return this.accounting.listNodes();
   }
 
   private parsePlan(raw: unknown): ExecutionPlan {

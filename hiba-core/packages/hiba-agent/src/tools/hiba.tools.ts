@@ -673,6 +673,29 @@ const orchestratorEchoRtt = defineTool({
   handler: notImplemented,
 });
 
+const orchestratorDeployServer = defineTool({
+  name: 'orchestrator.deployServer',
+  version: '1.0.0',
+  tags: ['orchestrator', 'write'],
+  description: '在新節點安裝或更新 Pi Sub-Web 伺服器',
+  inputSchema: z.object({
+    hibaRoot: z.string().optional().describe('安裝根目錄，預設 /opt/hiba'),
+    nodeId:   z.string().optional().describe('節點 ID，預設 m1'),
+    clawUrl:  z.string().optional().describe('Claw 主控端 URL'),
+  }),
+  outputSchema: z.object({
+    success:    z.boolean(),
+    steps:      z.array(z.unknown()),
+    warnings:   z.array(z.unknown()),
+    serverPath: z.string(),
+    scriptsDir: z.string(),
+    dataDir:    z.string(),
+  }),
+  permissions: ['orchestrator.write'],
+  timeout: 180_000,
+  handler: notImplemented,
+});
+
 const materialReadAttachment = defineTool({
   name: 'material.readAttachment',
   version: '1.0.0',
@@ -757,6 +780,7 @@ export const allHibaTools = [
   machineExecuteOrder,
   envReadSensor,
   orchestratorEchoRtt,
+  orchestratorDeployServer,
   materialReadAttachment,
   orchestratorListAgents,
 ];

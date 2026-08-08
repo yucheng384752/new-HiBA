@@ -1,6 +1,6 @@
 import { describe, expect, it, jest, afterEach } from '@jest/globals';
 import { z } from 'zod';
-import { defineTool } from './defineTool';
+import { defineTool, toToolSpec } from './defineTool';
 import type { ToolDefinition, ToolName } from '../types/hiba.types';
 
 const inputSchema = z.object({
@@ -49,6 +49,21 @@ describe('defineTool', () => {
       backoffMultiplier: 2,
       retryOn: ['TOOL_TIMEOUT'],
     });
+  });
+
+  it('exports a versioned ToolSpec with JSON input and output schemas', () => {
+    const spec = toToolSpec(defineTool(createDefinition()));
+
+    expect(spec.protocolVersion).toBe('1.0');
+    expect(spec.timeoutMs).toBe(5_000);
+    expect(spec.inputSchema).toEqual(expect.objectContaining({
+      type: 'object',
+      required: ['filePath'],
+    }));
+    expect(spec.outputSchema).toEqual(expect.objectContaining({
+      type: 'object',
+      required: ['ok'],
+    }));
   });
 
   it('preserves provided retryPolicy values', () => {
@@ -118,5 +133,27 @@ describe('defineTool', () => {
     expect(() => defineTool(createDefinition({
       tags: ['material', 'execute'] as unknown as ToolDefinition['tags'],
     }))).toThrow("tags[1]: 'execute'");
+  });
+
+  it('rejects definitions whose identity fields disagree', () => {
+    expect(() => defineTool(createDefinition({ version: 'v1' }))).toThrow('expected SemVer');
+    expect(() => defineTool(createDefinition({
+      tags: ['machine', 'write'],
+    }))).toThrow('name domain must match');
+    expect(() => defineTool(createDefinition({
+      permissions: ['material.read'],
+    }))).toThrow("permissions must include 'material.write'");
+  });
+
+  it('rejects invalid execution limits', () => {
+    expect(() => defineTool(createDefinition({ timeout: 0 }))).toThrow('positive integer');
+    expect(() => defineTool(createDefinition({
+      retryPolicy: {
+        maxAttempts: 0,
+        initialDelayMs: 100,
+        backoffMultiplier: 2,
+        retryOn: ['TOOL_TIMEOUT'],
+      },
+    }))).toThrow('retryPolicy values are out of range');
   });
 });

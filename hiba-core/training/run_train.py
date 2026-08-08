@@ -1,38 +1,33 @@
-"""
-Bootstrap script: pre-loads C extension dependencies in correct order
-to avoid Python 3.13 segfault when llamafactory.data is imported directly.
+"""Validate Core v1 data, then launch LLaMA-Factory LoRA training."""
 
-Must use if __name__ == '__main__' guard — Windows multiprocessing uses
-spawn, which re-imports this module in child processes.
-"""
-import json, os, sys, enum, typing
+import json
+import os
+import subprocess
+import sys
+import enum
+import typing
+from pathlib import Path
 
-# fsspec must be initialised before datasets touches its registry
 import fsspec
-
-# datasets triggers all pyarrow / multiprocessing init
-from datasets import (
-    DatasetDict,
-    concatenate_datasets,
-    interleave_datasets,
-    Dataset,
-    IterableDataset,
-)
-
-# llamafactory internal modules — order matters
+from datasets import Dataset, DatasetDict, IterableDataset, concatenate_datasets, interleave_datasets
 from llamafactory.extras import logging as lf_logging
 from llamafactory.hparams import DataArguments
-
-# Verify the previously-segfaulting submodules now load cleanly
 from llamafactory.data.data_utils import Role, split_dataset  # noqa: F401
 from llamafactory.data.collator import SFTDataCollatorWith4DAttentionMask  # noqa: F401
 
-if __name__ == "__main__":
-    # Disable Arrow file-cache to avoid WinError 1224 (mmap lock on Windows)
-    import datasets as _ds
-    _ds.disable_caching()
 
-    print("[run_train] dependency pre-load OK — starting training", flush=True)
+if __name__ == "__main__":
+    project_root = Path(__file__).parent.parent
+    os.chdir(project_root)
+    subprocess.run([
+        "node", "tools/validate-dataset.mjs",
+        "training/data/hiba-v1-train.jsonl",
+        "training/data/hiba-v1-eval.jsonl",
+    ], check=True)
+
+    import datasets as _datasets
+    _datasets.disable_caching()
+    print("[run_train] dataset validated; starting Llama 3.1 LoRA training", flush=True)
     sys.argv = ["llamafactory-cli", "train", "training/train_config.yaml"]
     from llamafactory.cli import main
     main()

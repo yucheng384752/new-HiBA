@@ -298,6 +298,11 @@
     position: relative; transform-origin: 0 0;
     min-width: max-content; min-height: max-content;
   }
+  .topo-canvas.topo-animating { animation: topoSwap .24s ease-out both; }
+  @keyframes topoSwap {
+    from { opacity: .35; filter: blur(2px); }
+    to   { opacity: 1; filter: blur(0); }
+  }
 
   /* Hub circle */
   .topo-hub {
@@ -349,6 +354,34 @@
 
   /* SVG connector lines overlay */
   .topo-lines-svg { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 1; overflow: visible; }
+  .topo-tree { position: relative; z-index: 2; margin-top: 16px; font-family: Consolas, monospace; font-size: 12px; color: var(--muted); min-width: 260px; }
+  .topo-tree-root { color: var(--accent); font-weight: 700; margin-bottom: 8px; padding-left: 2px; }
+  .topo-tree-rows { position: relative; margin-left: 10px; padding-left: 34px; }
+  .topo-tree-rows::before {
+    content: ""; position: absolute; left: 10px; top: -8px; bottom: 13px;
+    border-left: 1.5px solid rgba(61,141,232,.5);
+  }
+  .topo-tree-row {
+    position: relative; display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; align-items: center; gap: 8px;
+    min-height: 28px; padding: 4px 0; cursor: pointer; transition: color .15s, transform .15s;
+  }
+  .topo-tree-row::before {
+    content: ""; position: absolute; left: -24px; top: 50%; width: 22px;
+    border-top: 1.5px solid rgba(61,141,232,.5);
+  }
+  .topo-tree-row::after {
+    content: ""; position: absolute; left: -24px; top: 50%; height: calc(50% + 4px);
+    border-left: 1.5px solid rgba(61,141,232,.5);
+  }
+  .topo-tree-row:last-child::after { display: none; }
+  .topo-tree-row:hover { color: var(--text-bright); transform: translateX(3px); }
+  .topo-tree-row.active { color: var(--accent); font-weight: 700; }
+  .topo-tree-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 7px var(--green); }
+  .topo-tree-dot.offline { background: var(--red); box-shadow: 0 0 7px var(--red); }
+  .topo-tree-dot.checking { background: var(--amber); box-shadow: 0 0 7px var(--amber); animation: pulse 1s infinite; }
+  .topo-tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .topo-tree-meta { color: var(--muted); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .topo-tree-empty { color: var(--muted); font-size: 12px; padding: 10px 0 0 0; }
 
   /* Zoom controls */
   .topo-zoom-controls { position: absolute; bottom: 12px; right: 12px; z-index: 10; display: flex; flex-direction: column; gap: 4px; }
@@ -639,6 +672,7 @@ let sseSource = null;
 
 // Workflow state
 let workflowPlan = null;
+let activeWorkflowId = localStorage.getItem('wf_active_id');
 let workflowPlanningUrl  = localStorage.getItem('wf_planning_url')  || 'http://localhost:8090';
 let workflowAccountingUrl = localStorage.getItem('wf_accounting_url') || 'http://localhost:9090';
 
@@ -679,6 +713,12 @@ function toast(msg, color = 'var(--text)') {
   toastEl.textContent = msg;
   document.body.appendChild(toastEl);
   setTimeout(() => toastEl.remove(), 3000);
+}
+
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+  }[ch]));
 }
 
 async function safeFetch(url, opts = {}) {
@@ -801,9 +841,13 @@ function renderNodeList() {
 
   const isFullWidth = !document.getElementById('mainLayout')?.classList.contains('node-selected');
   canvas.dataset.layout = isFullWidth ? 'h' : 'v';
+  canvas.classList.remove('topo-animating');
+  void canvas.offsetWidth;
+  canvas.classList.add('topo-animating');
 
   const entries = [...nodes.entries()];
   const sc = s => s === 'online' ? 'online' : s === 'offline' ? 'offline' : 'checking';
+  const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
   const hubClickAttr = activeNodeId ? `onclick="deselectNode()" title="點擊返回拓樸視圖"` : `title="CLAW Dashboard"`;
   const hubBack = activeNodeId ? `<span class="hub-back">← 返回</span>` : '';
@@ -833,6 +877,26 @@ function renderNodeList() {
           </div>
         </div>`;
       }).join('');
+  const treeHtml = entries.length === 0
+    ? `<div class="topo-tree"><div class="topo-tree-root">dashboard</div><div class="topo-tree-empty">No nodes ??add above</div></div>`
+    : `<div class="topo-tree">
+        <div class="topo-tree-root">dashboard</div>
+        <div class="topo-tree-rows">
+        ${entries.map(([id, node]) => {
+          const status = sc(node.status);
+          const alias = nodeAliases.get(id);
+          const urlObj = parseUrl(node.url);
+          const sub = urlObj ? `${urlObj.hostname}:${urlObj.port || '80'}` : node.url;
+          const isActive = id === activeNodeId;
+          const label = alias ? `${id} / ${alias}` : id;
+          return `<div class="topo-tree-row${isActive ? ' active' : ''}" onclick="selectNode('${id}')" title="${esc(node.url)}">
+            <span class="topo-tree-dot ${status}"></span>
+            <span class="topo-tree-label">${esc(label)}<span class="topo-tree-meta">${esc(sub)}</span></span>
+            <span>${isActive ? '*' : ''}</span>
+          </div>`;
+        }).join('')}
+        </div>
+      </div>`;
 
   canvas.innerHTML = `
     <div class="topo-hub" id="topoHub" ${hubClickAttr}>
@@ -840,7 +904,7 @@ function renderNodeList() {
       <span class="hub-sub">dashboard</span>
       ${hubBack}
     </div>
-    <div class="topo-node-list" id="topoNodeList">${cardsHtml}</div>
+    ${isFullWidth ? `<div class="topo-node-list" id="topoNodeList">${cardsHtml}</div>` : treeHtml}
     <svg class="topo-lines-svg" id="topoLinesSvg" xmlns="http://www.w3.org/2000/svg"></svg>`;
 
   requestAnimationFrame(drawTopoLines);
@@ -853,7 +917,10 @@ function drawTopoLines() {
   const hub    = document.getElementById('topoHub');
   const canvas = document.getElementById('topoCanvas');
   const cards  = canvas?.querySelectorAll('.topo-node-card');
-  if (!svg || !hub || !canvas || !cards?.length) return;
+  if (!svg || !hub || !canvas || !cards?.length) {
+    if (svg) svg.innerHTML = '';
+    return;
+  }
 
   const isH = canvas.dataset.layout === 'h';
   const cr  = canvas.getBoundingClientRect();
@@ -1184,14 +1251,19 @@ function renderHealth() {
 }
 
 // ── Script Card Helpers ───────────────────────────────────────────────────
+function schemaFields(schema) {
+  const required = new Set(schema?.required || []);
+  return Object.entries(schema?.properties || {}).map(([key, meta]) => [key, { ...meta, required: required.has(key) }]);
+}
+
 function buildSchemaTable(s) {
-  const inputRows = Object.entries(s.inputSchema || {}).map(([key, meta]) => `
+  const inputRows = schemaFields(s.inputSchema).map(([key, meta]) => `
     <tr>
       <td style="color:var(--text);font-weight:500">${key}${meta.required ? '<span style="color:var(--red)">*</span>' : ''}</td>
       <td style="color:var(--purple)">${meta.type}</td>
       <td style="color:var(--muted)">${meta.description || '—'}</td>
     </tr>`).join('');
-  const outputRows = Object.entries(s.outputSchema || {}).map(([key, meta]) => `
+  const outputRows = schemaFields(s.outputSchema).map(([key, meta]) => `
     <tr>
       <td style="color:var(--text)">${key}</td>
       <td style="color:var(--purple)">${meta.type || '—'}</td>
@@ -1212,7 +1284,7 @@ function buildSchemaTable(s) {
 }
 
 function buildParamFields(s, uid) {
-  return Object.entries(s.inputSchema || {}).map(([key, meta]) => `
+  return schemaFields(s.inputSchema).map(([key, meta]) => `
     <div class="form-field" style="margin-bottom:8px">
       <label>${key}${meta.required ? '<span style="color:var(--red)">*</span>' : ''}
         <span style="color:var(--purple)">${meta.type}</span>
@@ -1268,8 +1340,8 @@ async function renderScripts() {
     return;
   }
 
-  const favScripts  = node.scripts.filter(s => favorites.has(s.name));
-  const restScripts = node.scripts.filter(s => !favorites.has(s.name));
+  const favScripts  = node.scripts.filter(s => favorites.has(s.scriptName));
+  const restScripts = node.scripts.filter(s => !favorites.has(s.scriptName));
 
   const favSection = favScripts.length ? `
     <div class="section-label">⭐ 標記常用 <span style="color:var(--yellow);font-size:11px">${favScripts.length}</span></div>
@@ -1290,27 +1362,27 @@ async function renderScripts() {
 }
 
 function buildScriptCard(s, nodeId) {
-  const isFav  = favorites.has(s.name);
-  const cardId = `body_${nodeId}_${s.name}`;
-  const uid    = `${nodeId}_${s.name}`;
+  const isFav  = favorites.has(s.scriptName);
+  const cardId = `body_${nodeId}_${s.scriptName}`;
+  const uid    = `${nodeId}_${s.scriptName}`;
   const paramFields = buildParamFields(s, uid);
   return `
     <div class="script-item">
       <div class="script-header" onclick="toggleScript('${cardId}')">
         <button class="fav-star ${isFav ? 'active' : ''}"
           title="${isFav ? '取消最愛' : '加入最愛'}"
-          onclick="event.stopPropagation();toggleFavorite('${s.name}')">${isFav ? '★' : '☆'}</button>
+          onclick="event.stopPropagation();toggleFavorite('${s.scriptName}')">${isFav ? '★' : '☆'}</button>
         <span class="script-name">${s.name}</span>
         <span class="script-desc">${s.description || ''}</span>
         <span class="badge ${s.renderHint || 'text'}">${s.renderHint || 'text'}</span>
-        ${s.timeout ? `<span style="font-size:10px;color:var(--muted)">${s.timeout/1000}s</span>` : ''}
+        ${s.timeoutMs ? `<span style="font-size:10px;color:var(--muted)">${s.timeoutMs/1000}s</span>` : ''}
       </div>
       <div class="script-body" id="${cardId}">
         ${buildSchemaTable(s)}
         <div style="border-top:1px solid var(--border);margin:0 -16px 14px;"></div>
         ${paramFields || '<p style="color:var(--muted);font-size:12px;margin-bottom:10px">No parameters required</p>'}
         ${buildAttachWidget(`att_${uid}`)}
-        <button class="run-btn" id="runbtn_${uid}" onclick="runScriptInline('${nodeId}','${s.name}')">▶ Execute</button>
+        <button class="run-btn" id="runbtn_${uid}" onclick="runScriptInline('${nodeId}','${s.scriptName}')">▶ Execute</button>
         <div id="sresult_${uid}"></div>
       </div>
     </div>`;
@@ -1325,14 +1397,14 @@ function toggleFavorite(scriptName) {
 
 async function runScriptInline(nodeId, scriptName) {
   const node = nodes.get(nodeId);
-  const s = node?.scripts.find(x => x.name === scriptName);
+  const s = node?.scripts.find(x => x.scriptName === scriptName);
   if (!node || !s) return;
   const uid = `${nodeId}_${scriptName}`;
   const btn = document.getElementById(`runbtn_${uid}`);
   const resultEl = document.getElementById(`sresult_${uid}`);
 
   const params = {};
-  for (const [key, meta] of Object.entries(s.inputSchema || {})) {
+  for (const [key, meta] of schemaFields(s.inputSchema)) {
     const raw = document.getElementById(`sp_${uid}_${key}`)?.value.trim() ?? '';
     if (raw === '' && !meta.required) continue; // skip empty optional fields
     params[key] = meta.type === 'number' ? Number(raw) : raw;
@@ -1997,6 +2069,8 @@ function renderWorkflow() {
 async function generatePlan() {
   const rawTask = document.getElementById('nlTaskInput').value.trim();
   if (!rawTask) { toast('請輸入任務描述', 'var(--amber)'); return; }
+  const planningBaseUrl = workflowPlanningUrl.replace(/\/+$/, '');
+  const planUrl = `${planningBaseUrl}/api/plan`;
 
   // 上下文注入：將節點別名 + 工具清單拼入 task，讓 LLM 能解析「P3站點」等業務名稱
   const injectCtx = document.getElementById('injectCtxToggle')?.checked !== false;
@@ -2016,7 +2090,10 @@ async function generatePlan() {
   btn.innerHTML = '<span class="spinner"></span> Generating…';
 
   try {
-    const res = await safeFetch(`${workflowPlanningUrl}/api/plan`, {
+    const health = await safeFetch(`${planningBaseUrl}/health`, { timeout: 3000 });
+    if (!health.ok) throw new Error(`Planning server health check returned HTTP ${health.status}`);
+
+    const res = await safeFetch(planUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ task }),
@@ -2024,10 +2101,20 @@ async function generatePlan() {
     });
     if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0,120)}`); }
     workflowPlan = await res.json();
+    activeWorkflowId = workflowPlan.workflowId || null;
+    if (activeWorkflowId) localStorage.setItem('wf_active_id', activeWorkflowId);
     renderPlan();
     toast('Plan generated', 'var(--green)');
   } catch (e) {
-    toast(`Plan failed: ${e.message}`, 'var(--red)');
+    const message = e instanceof Error ? e.message : String(e);
+    workflowPlan = {
+      steps: [],
+      supervisorPolicy: 'fail-fast',
+      error: `Plan request failed: ${message}`,
+      errorDetail: `Planning URL: ${planUrl}`,
+    };
+    renderPlan();
+    toast(`Plan failed: ${message}`, 'var(--red)');
   } finally {
     btn.disabled = false;
     updateActionBtn();
@@ -2043,7 +2130,17 @@ function renderPlan() {
     return;
   }
   if (workflowPlan.error) {
-    container.innerHTML = `<div class="wf-err">Plan error: ${workflowPlan.error}</div>`;
+    const detail = workflowPlan.errorDetail
+      ? `<div style="margin-top:8px;color:var(--muted);font-family:Consolas,monospace;font-size:11px">${escapeHtml(workflowPlan.errorDetail)}</div>`
+      : '';
+    container.innerHTML = `<div class="wf-err">
+      <div style="font-weight:700;margin-bottom:6px">Plan error</div>
+      <div>${escapeHtml(workflowPlan.error)}</div>
+      ${detail}
+      <div style="margin-top:10px;color:var(--muted);font-size:12px">
+        Check that the planning agent is running on the configured Planning URL, and that Accounting and LLM services are available.
+      </div>
+    </div>`;
     return;
   }
 
@@ -2125,14 +2222,19 @@ async function executePlan() {
   document.getElementById('execResultArea')?.remove();
 
   try {
-    const res = await safeFetch(`${workflowPlanningUrl}/api/run`, {
+    const persistent = workflowPlan.workflowId || activeWorkflowId;
+    const runUrl = persistent
+      ? `${workflowPlanningUrl}/api/workflows/${encodeURIComponent(persistent)}/run`
+      : `${workflowPlanningUrl}/api/run`;
+    const res = await safeFetch(runUrl, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json', 'X-Agent-Id': AGENT_ID },
       body:    JSON.stringify({ plan: workflowPlan }),
-      timeout: 120_000,
+      timeout: persistent ? 10_000 : 120_000,
     });
     if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0,120)}`); }
-    const data = await res.json();
+    const accepted = await res.json();
+    const data = persistent ? await pollWorkflow(persistent) : accepted;
     renderExecutionResult(data);
     const ok = data.failed === 0;
     toast(ok ? `✓ ${data.succeeded} steps succeeded` : `✗ ${data.failed} failed`, ok ? 'var(--green)' : 'var(--red)');
@@ -2144,7 +2246,53 @@ async function executePlan() {
   }
 }
 
+async function pollWorkflow(workflowId) {
+  while (true) {
+    const res = await safeFetch(`${workflowPlanningUrl}/api/workflows/${encodeURIComponent(workflowId)}`, { timeout: 8000 });
+    if (!res.ok) throw new Error(`Workflow status HTTP ${res.status}`);
+    const workflow = await res.json();
+    renderWorkflowProgress(workflow);
+    if (['succeeded','failed','partial_success','interrupted'].includes(workflow.status)) {
+      if (!workflow.result) throw new Error(workflow.error || `Workflow ended as ${workflow.status}`);
+      return workflow.result;
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000));
+  }
+}
+
+function renderWorkflowProgress(workflow) {
+  document.getElementById('execResultArea')?.remove();
+  const el = document.createElement('div');
+  el.id = 'execResultArea';
+  el.className = 'exec-result';
+  const rows = (workflow.steps || []).map(step => `
+    <div class="exec-result-row">
+      <span class="exec-step-dot" style="background:${step.status==='succeeded'?'var(--green)':step.status==='failed'?'var(--red)':step.status==='running'?'var(--yellow)':'var(--muted)'}"></span>
+      <span style="font-family:Consolas;color:var(--accent);min-width:64px;font-size:11px">${escapeHtml(step.stepId)}</span>
+      <span style="color:var(--text-bright);flex:1">${escapeHtml(step.toolName)}</span>
+      <span style="color:var(--muted);font-size:11px">${escapeHtml(step.nodeId)}</span>
+      <span style="color:var(--muted);font-size:11px;min-width:80px;text-align:right">${escapeHtml(step.status)}</span>
+    </div>`).join('');
+  el.innerHTML = `<div class="exec-result-header"><strong>${escapeHtml(workflow.status)}</strong><span style="margin-left:auto;font-family:Consolas;font-size:11px">${escapeHtml(workflow.workflowId)}</span></div>${rows}`;
+  document.getElementById('wfPlanContainer').appendChild(el);
+}
+
+async function retryWorkflow() {
+  if (!activeWorkflowId) return;
+  try {
+    const res = await safeFetch(`${workflowPlanningUrl}/api/workflows/${encodeURIComponent(activeWorkflowId)}/retry`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Agent-Id': AGENT_ID }, timeout: 10000,
+    });
+    if (!res.ok) throw new Error(`Retry HTTP ${res.status}`);
+    const data = await pollWorkflow(activeWorkflowId);
+    renderExecutionResult(data);
+  } catch (error) {
+    toast(`Retry failed: ${error.message}`, 'var(--red)');
+  }
+}
+
 function renderExecutionResult(run) {
+  document.getElementById('execResultArea')?.remove();
   const container = document.getElementById('wfPlanContainer');
   const ok        = run.failed === 0;
   const total     = (run.succeeded || 0) + (run.failed || 0) + (run.skipped || 0);
@@ -2171,6 +2319,7 @@ function renderExecutionResult(run) {
       <span style="color:var(--muted)">${run.succeeded} ok · ${run.failed} fail · ${run.skipped || 0} skipped</span>
       <span style="color:var(--muted)">anchored: ${run.anchored}</span>
       <span style="color:var(--muted);margin-left:auto;font-family:Consolas;font-size:11px">${run.runId}</span>
+      ${!ok && activeWorkflowId ? '<button class="wf-act-btn" onclick="retryWorkflow()">Retry</button>' : ''}
     </div>
     ${stepsHtml}`;
   container.appendChild(el);
@@ -2197,6 +2346,8 @@ function nlAction() {
 
 function clearNl() {
   workflowPlan = null;
+  activeWorkflowId = null;
+  localStorage.removeItem('wf_active_id');
   const ta = document.getElementById('nlTaskInput');
   if (ta) ta.value = '';
   renderPlan();
@@ -2237,7 +2388,7 @@ function buildPlanContext() {
       : `節點 ${id}（URL: ${node.url}）`;
     lines.push(head);
     for (const s of (node.scripts || [])) {
-      lines.push(`  - toolName: ${s.toolName}　description: ${s.description || s.name}`);
+      lines.push(`  - toolName: ${s.name}　description: ${s.description || s.name}`);
     }
   }
   return lines.join('\n');
@@ -2248,6 +2399,19 @@ document.getElementById('wfPlanningUrl').value  = workflowPlanningUrl;
 document.getElementById('wfAccountingUrl').value = workflowAccountingUrl;
 (async () => {
   initTopoInteraction();
+
+  if (activeWorkflowId) {
+    try {
+      const res = await safeFetch(`${workflowPlanningUrl}/api/workflows/${encodeURIComponent(activeWorkflowId)}`, { timeout: 5000 });
+      if (res.ok) {
+        const workflow = await res.json();
+        workflowPlan = { ...workflow.plan, workflowId: workflow.workflowId };
+        renderPlan();
+        if (workflow.result) renderExecutionResult(workflow.result);
+        else renderWorkflowProgress(workflow);
+      }
+    } catch { /* planning server may still be starting */ }
+  }
 
   // Restore persisted nodes from localStorage
   const saved = JSON.parse(localStorage.getItem('claw_nodes') || '[]');

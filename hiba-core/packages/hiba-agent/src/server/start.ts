@@ -6,6 +6,7 @@ import { AuditTrail }           from '../audit/AuditTrail';
 import { TrustRegistry }        from '../trust/TrustRegistry';
 import { OrchestratorRunner, parseNodeAddresses } from './OrchestratorRunner';
 import { AgentServer }          from './AgentServer';
+import { WorkflowStore }        from './WorkflowStore';
 import { registerHibaTools }    from '../tools/hiba.tools';
 import { registerAuditTools }   from '../tools/audit.tools';
 import type { ToolPermission }  from '../types/hiba.types';
@@ -25,8 +26,6 @@ async function main(): Promise<void> {
     },
   );
 
-  const planning = new NLPlanningService(llm, accounting);
-
   const permissions: ToolPermission[] = [
     'material.write', 'material.read',
     'machine.write',  'machine.read',
@@ -39,9 +38,12 @@ async function main(): Promise<void> {
   const audit    = new AuditTrail(env('AUDIT_DB', './hiba-audit.db'));
   const toolbox  = new HiBAToolbox({ auditWriter: audit, permissions });
   const registry = new TrustRegistry(env('TRUST_DB', './hiba-trust.db'));
+  const workflowStore = new WorkflowStore(env('WORKFLOW_DB', './hiba-workflows.db'));
 
   registerHibaTools(toolbox);
   registerAuditTools(toolbox, audit);
+
+  const planning = new NLPlanningService(llm, accounting, { toolbox });
 
   const nodeAddresses = process.env['NODE_ADDRESSES']
     ? parseNodeAddresses(process.env['NODE_ADDRESSES'])
@@ -57,6 +59,8 @@ async function main(): Promise<void> {
     toolbox,
     registry,
     orchestrator,
+    workflowStore,
+    auditTrail: audit,
     defaultCtx: {
       hibaBaseUrl: env('HIBA_BASE_URL', 'http://localhost:9090'),
       permissions,

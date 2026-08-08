@@ -9,7 +9,9 @@ import type {
   ToolName,
   ToolResult,
 } from '../types/hiba.types';
+import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
 import type { RegisteredTool } from './defineTool';
+import { createToolFailure, isHiBAErrorCode } from './errors';
 
 export interface HiBAToolboxOptions {
   auditWriter: AuditWriter;
@@ -46,6 +48,9 @@ export class HiBAToolbox {
   }
 
   register(tool: RegisteredTool): void {
+    if (this.tools.has(tool.name)) {
+      throw new Error(`Tool '${tool.name}' is already registered`);
+    }
     this.tools.set(tool.name, tool);
   }
 
@@ -114,7 +119,13 @@ export class HiBAToolbox {
     }
 
     try {
-      const output = await this.executeWithRetry(tool, input, ctx);
+      const rawOutput = await this.executeWithRetry(tool, input, ctx);
+      let output: unknown;
+      try {
+        output = tool.outputSchema.parse(rawOutput);
+      } catch (error) {
+        throw createToolError('OUTPUT_INVALID', formatSchemaError(error));
+      }
       const executedAt = new Date().toISOString();
       const durationMs = Date.now() - startedAt;
       const auditHash = computeAuditHash(ctx.traceId, toolName, executedAt, true);
@@ -134,6 +145,7 @@ export class HiBAToolbox {
 
       return {
         success: true,
+        protocolVersion: HIBA_PROTOCOL_VERSION,
         output: output as TOutput,
         auditHash,
         durationMs,
@@ -217,14 +229,7 @@ export class HiBAToolbox {
       auditHash,
     });
 
-    return {
-      success: false,
-      errorCode,
-      error,
-      auditHash,
-      durationMs,
-      executedAt,
-    };
+    return createToolFailure(errorCode, error, { auditHash, durationMs, executedAt });
   }
 }
 
@@ -300,19 +305,6 @@ function hasErrorCode(error: unknown): error is { errorCode: HiBAErrorCode } {
     error !== null &&
     'errorCode' in error &&
     isHiBAErrorCode((error as { errorCode: unknown }).errorCode)
-  );
-}
-
-function isHiBAErrorCode(value: unknown): value is HiBAErrorCode {
-  return (
-    value === 'SCHEMA_VALIDATION_ERROR' ||
-    value === 'TOOL_NOT_FOUND' ||
-    value === 'AGENT_NOT_REGISTERED' ||
-    value === 'PERMISSION_EXCEEDS_PARENT' ||
-    value === 'AUDIT_ANCHOR_FAILED' ||
-    value === 'TOOL_TIMEOUT' ||
-    value === 'MAX_DEPTH_EXCEEDED' ||
-    value === 'HANDLER_EXECUTION_FAILED'
   );
 }
 

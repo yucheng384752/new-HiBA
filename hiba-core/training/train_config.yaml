@@ -11,21 +11,20 @@ lora_dropout: 0.05
 lora_target: all
 
 ### dataset
-dataset: hiba_workflow
+dataset: hiba_workflow_v1
 dataset_dir: ./training
 template: llama3
-cutoff_len: 2048
-max_samples: 304
+cutoff_len: 4096
 overwrite_cache: true
 preprocessing_num_workers: 1
 
 ### output
-output_dir: ./training/hiba-planner-lora
-logging_dir: ./training/logs
+output_dir: ./training/hiba-planner-v1-lora
+logging_dir: ./training/logs-v1
 logging_steps: 10
-save_steps: 18
+save_steps: 20
 plot_loss: true
-overwrite_output_dir: true
+overwrite_output_dir: false
 
 ### train
 per_device_train_batch_size: 4
@@ -36,9 +35,10 @@ lr_scheduler_type: cosine
 warmup_ratio: 0.1
 bf16: true
 ddp_timeout: 180000000
+seed: 42
 
 ### eval
 val_size: 0.1
 per_device_eval_batch_size: 2
 eval_strategy: steps
-eval_steps: 100
+eval_steps: 20

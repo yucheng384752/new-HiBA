@@ -19,6 +19,7 @@
  */
 
 import { test, expect, beforeAll, afterAll, describe } from '@jest/globals';
+import http from 'node:http';
 import { z } from 'zod';
 import { OrchestratorRunner, parseNodeAddresses } from './OrchestratorRunner';
 import { AgentServer } from './AgentServer';
@@ -39,8 +40,9 @@ const BASE_CTX: ToolContext = {
   permissions: ['material.write', 'material.read'],
 };
 
-function makeRunner(anchorShouldFail = false, nodeAddresses?: Map<string, string>, accountingUrl?: string) {
+function makeRunner(anchorShouldFail = false, nodeAddresses?: Map<string, string>, accountingUrl?: string, auditOut?: AuditTrail[]) {
   const audit = new AuditTrail(':memory:');
+  auditOut?.push(audit);
   // Always mock batchUploadToChain — tests run without a live accounting server
   (audit as unknown as { batchUploadToChain: () => Promise<void> }).batchUploadToChain =
     anchorShouldFail
@@ -94,7 +96,7 @@ function step(
   input: Record<string, unknown> = {},
   dependsOn: string[] = [],
 ) {
-  return { stepId, toolName, nodeId: 'node-1', version: '1.0.0', input, dependsOn } as
+  return { stepId, toolName, nodeId: 'local', version: '1.0.0', input, dependsOn } as
     import('../types/hiba.types').PlanStep;
 }
 
@@ -145,6 +147,30 @@ test('sequential dependsOn S1→S2: both succeed, correct order', async () => {
   expect(result.failed).toBe(0);
   expect(result.steps[0]?.stepId).toBe('S1');
   expect(result.steps[1]?.stepId).toBe('S2');
+});
+
+test('downstream input resolves an explicit upstream output reference', async () => {
+  const runner = makeRunner();
+  const plan: ExecutionPlan = {
+    steps: [
+      step('S1', 'material.protectFile', { filePath: '/abc' }),
+      step('S2', 'material.verifyFile', { filePath: '$steps.S1.output.txHash' }, ['S1']),
+    ],
+    supervisorPolicy: 'fail-fast',
+  };
+  const result = await runner.run(plan, BASE_CTX);
+  expect(result.succeeded).toBe(2);
+});
+
+test('missing upstream output reference fails before dispatch', async () => {
+  const runner = makeRunner();
+  const plan: ExecutionPlan = {
+    steps: [step('S1', 'material.verifyFile', { filePath: '$steps.missing.output.path' })],
+    supervisorPolicy: 'fail-fast',
+  };
+  const result = await runner.run(plan, BASE_CTX);
+  expect(result.failed).toBe(1);
+  expect((result.steps[0]?.result as { errorCode: string }).errorCode).toBe('SCHEMA_VALIDATION_ERROR');
 });
 
 test('parallel layer: S1 and S2 independent, both executed', async () => {
@@ -243,7 +269,7 @@ test('audit anchor failure → anchored=false but run succeeds', async () => {
   expect(result.succeeded).toBe(1);
 });
 
-test('dispatched=local when nodeId not in registry', async () => {
+test('dispatched=local when nodeId is explicitly local', async () => {
   const runner = makeRunner(); // empty nodeAddresses
   const plan: ExecutionPlan = {
     steps: [step('S1', 'material.protectFile', { filePath: '/a' })],
@@ -261,6 +287,7 @@ const mockLLM: LLMClient = {
 const mockAccounting: AccountingClient = {
   listNodeResources: async () => ({}),
   getNodeResources: async () => [],
+  listNodes: async () => [],
 };
 
 let remoteServer: AgentServer;
@@ -297,7 +324,8 @@ afterAll(async () => {
 describe('remote dispatch', () => {
   test('dispatched=remote when nodeId registered; result from remote server', async () => {
     const nodeAddresses = new Map([['node-remote', `http://localhost:${remotePort}`]]);
-    const runner = makeRunner(false, nodeAddresses);
+    const audits: AuditTrail[] = [];
+    const runner = makeRunner(false, nodeAddresses, undefined, audits);
     const plan: ExecutionPlan = {
       steps: [{ stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-remote',
                 version: '1.0.0', input: { filePath: '/remote.xml' }, dependsOn: [] }],
@@ -308,6 +336,13 @@ describe('remote dispatch', () => {
     expect(result.succeeded).toBe(1);
     const output = (result.steps[0]?.result as { success: true; output: { txHash: string } }).output;
     expect(output.txHash).toMatch(/^remote:/);
+    const events = await audits[0]!.queryEvents({ eventType: 'DATA_TRANSFERRED' });
+    expect(events).toEqual([expect.objectContaining({
+      traceId: BASE_CTX.traceId,
+      subjectId: result.runId,
+      success: true,
+      metadata: expect.objectContaining({ nodeId: 'node-remote', stepId: 'S1' }),
+    })]);
   });
 
   test('remote node returns non-200 → ToolFailure with HANDLER_EXECUTION_FAILED', async () => {
@@ -326,12 +361,39 @@ describe('remote dispatch', () => {
     expect(failure.errorCode).toBe('HANDLER_EXECUTION_FAILED');
   });
 
+  test('rejects a successful remote response whose output violates ToolSpec', async () => {
+    const invalidPort = 18201;
+    const invalidNode = http.createServer((_req, res) => {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, output: { txHash: 123 } }));
+    });
+    await new Promise<void>(resolve => invalidNode.listen(invalidPort, resolve));
+    try {
+      const runner = makeRunner(false, new Map([['node-invalid', `http://localhost:${invalidPort}`]]));
+      const result = await runner.run({
+        steps: [{ stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-invalid',
+          version: '1.0.0', input: { filePath: '/x' }, dependsOn: [] }],
+        supervisorPolicy: 'fail-fast',
+      }, BASE_CTX);
+
+      expect(result.failed).toBe(1);
+      expect(result.steps[0]?.result).toEqual(expect.objectContaining({
+        success: false,
+        protocolVersion: '1.0',
+        errorCode: 'OUTPUT_INVALID',
+        retryable: false,
+      }));
+    } finally {
+      await new Promise<void>((resolve, reject) => invalidNode.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
   test('mixed local + remote in same plan', async () => {
     const nodeAddresses = new Map([['node-remote', `http://localhost:${remotePort}`]]);
     const runner = makeRunner(false, nodeAddresses);
     const plan: ExecutionPlan = {
       steps: [
-        { stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-local',
+        { stepId: 'S1', toolName: 'material.protectFile', nodeId: 'local',
           version: '1.0.0', input: { filePath: '/local.xml' }, dependsOn: [] },
         { stepId: 'S2', toolName: 'material.protectFile', nodeId: 'node-remote',
           version: '1.0.0', input: { filePath: '/remote.xml' }, dependsOn: ['S1'] },
@@ -350,7 +412,10 @@ describe('remote dispatch', () => {
 describe('dynamic node discovery', () => {
   let accountingServer: import('http').Server;
   let accountingPort: number;
-  let registeredNodes: Array<{ nodeId: string; agentUrl: string | null }>;
+  let registeredNodes: Array<{
+    nodeId: string; agentUrl: string | null; status?: string;
+    resources?: Array<{ name: string; version: string; type: string }>;
+  }>;
 
   beforeAll(async () => {
     accountingPort = 18300;
@@ -367,7 +432,10 @@ describe('dynamic node discovery', () => {
   });
 
   test('discovers remote node via accounting server', async () => {
-    registeredNodes = [{ nodeId: 'node-dynamic', agentUrl: `http://localhost:${remotePort}` }];
+    registeredNodes = [{
+      nodeId: 'node-dynamic', agentUrl: `http://localhost:${remotePort}`, status: 'online',
+      resources: [{ name: 'material.protectFile', version: '1.0.0', type: 'tool' }],
+    }];
     const runner = makeRunner(false, new Map(), `http://localhost:${accountingPort}`);
     const plan: ExecutionPlan = {
       steps: [{ stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-dynamic',
@@ -396,7 +464,7 @@ describe('dynamic node discovery', () => {
     expect(result.steps[0]?.dispatched).toBe('remote');
   });
 
-  test('accounting server unreachable → falls back to local', async () => {
+  test('accounting server unreachable → remote step fails closed', async () => {
     const runner = makeRunner(false, new Map(), 'http://localhost:19998');
     const plan: ExecutionPlan = {
       steps: [{ stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-fallback',
@@ -404,12 +472,11 @@ describe('dynamic node discovery', () => {
       supervisorPolicy: 'fail-fast',
     };
     const result = await runner.run(plan, BASE_CTX);
-    // node-fallback not in static map, accounting unreachable → local execution
-    expect(result.steps[0]?.dispatched).toBe('local');
-    expect(result.succeeded).toBe(1);
+    expect(result.steps[0]?.dispatched).toBe('remote');
+    expect(result.failed).toBe(1);
   });
 
-  test('accounting returns null agentUrl for node → falls back to local', async () => {
+  test('accounting returns null agentUrl for node → remote step fails closed', async () => {
     registeredNodes = [{ nodeId: 'node-null-url', agentUrl: null }];
     const runner = makeRunner(false, new Map(), `http://localhost:${accountingPort}`);
     const plan: ExecutionPlan = {
@@ -418,8 +485,8 @@ describe('dynamic node discovery', () => {
       supervisorPolicy: 'fail-fast',
     };
     const result = await runner.run(plan, BASE_CTX);
-    expect(result.steps[0]?.dispatched).toBe('local');
-    expect(result.succeeded).toBe(1);
+    expect(result.steps[0]?.dispatched).toBe('remote');
+    expect(result.failed).toBe(1);
   });
 });
 

@@ -1,6 +1,8 @@
-import type { ExecutionPlan, PlanStep, ToolContext, ToolResult, ToolName } from '../types/hiba.types';
+import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
+import type { ExecutionPlan, NodeDescriptor, PlanStep, ToolContext, ToolResult, ToolName } from '../types/hiba.types';
 import type { HiBAToolbox } from '../core/HiBAToolbox';
 import type { AuditTrail } from '../audit/AuditTrail';
+import { createToolFailure, isHiBAErrorCode } from '../core/errors';
 
 // ── Public types ──────────────────────────────────────────────────────────────
 
@@ -38,6 +40,14 @@ export interface OrchestratorOptions {
   accountingUrl?: string;
 }
 
+export interface RunHooks {
+  runId?: string;
+  completedSteps?: StepResult[];
+  onStepStart?: (step: PlanStep) => void;
+  onStepComplete?: (step: StepResult) => void;
+  onStepSkipped?: (step: PlanStep) => void;
+}
+
 // ── OrchestratorRunner ────────────────────────────────────────────────────────
 
 export class OrchestratorRunner {
@@ -57,8 +67,8 @@ export class OrchestratorRunner {
     this.accountingUrl     = options.accountingUrl;
   }
 
-  async run(plan: ExecutionPlan, baseCtx: ToolContext): Promise<RunResult> {
-    const runId = `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  async run(plan: ExecutionPlan, baseCtx: ToolContext, hooks: RunHooks = {}): Promise<RunResult> {
+    const runId = hooks.runId ?? `run-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const policy = plan.supervisorPolicy;
 
     if (plan.error) {
@@ -77,42 +87,79 @@ export class OrchestratorRunner {
     }
 
     // Resolve node addresses: static overrides dynamic
-    const addresses = await this.buildAddressMap(plan.steps);
+    const { addresses, nodes } = await this.buildNodeDirectory(plan.steps);
 
-    const stepResults: StepResult[] = [];
+    const stepResults: StepResult[] = [...(hooks.completedSteps ?? [])];
+    const completedIds = new Set(stepResults.filter(s => s.result.success).map(s => s.stepId));
+    const outputs = new Map(stepResults.filter(s => s.result.success).map(s => [s.stepId, (s.result as { output: unknown }).output]));
     const failedIds = new Set<string>();
     let skipped = 0;
     let aborted = false;
 
     for (const layer of layers) {
-      if (aborted) { skipped += layer.length; continue; }
+      const pendingLayer = layer.filter(step => !completedIds.has(step.stepId));
+      if (aborted) {
+        skipped += pendingLayer.length;
+        pendingLayer.forEach(step => hooks.onStepSkipped?.(step));
+        continue;
+      }
 
       // Skip steps whose dependencies failed
       const [runnable, blocked] = partition(
-        layer,
+        pendingLayer,
         step => !step.dependsOn.some(dep => failedIds.has(dep)),
       );
       skipped += blocked.length;
+      blocked.forEach(step => hooks.onStepSkipped?.(step));
       if (runnable.length === 0) continue;
 
       // Execute current layer in parallel
       const layerResults = await Promise.all(
         runnable.map(async step => {
           const stepCtx: ToolContext = { ...baseCtx, depth: baseCtx.depth + 1 };
-          const { result, dispatched } = await this.dispatchStep(step, stepCtx, addresses);
-          return { step, result, dispatched } as
-            { step: PlanStep; result: ToolResult; dispatched: 'local' | 'remote' };
+          hooks.onStepStart?.(step);
+          let executable = step;
+          let result: ToolResult;
+          let dispatched: 'local' | 'remote';
+          let nodeId = step.nodeId;
+          try {
+            executable = { ...step, input: resolveStepReferences(step.input, outputs) as Record<string, unknown> };
+            ({ result, dispatched, nodeId } = await this.dispatchStep(executable, stepCtx, addresses, nodes));
+          } catch (error) {
+            result = failure('SCHEMA_VALIDATION_ERROR', error instanceof Error ? error.message : String(error));
+            dispatched = step.nodeId === 'local' ? 'local' : 'remote';
+          }
+          return { step: executable, result, dispatched, nodeId } as
+            { step: PlanStep; result: ToolResult; dispatched: 'local' | 'remote'; nodeId: string };
         }),
       );
 
-      for (const { step, result, dispatched } of layerResults) {
-        stepResults.push({
+      for (const { step, result, dispatched, nodeId } of layerResults) {
+        const stepResult: StepResult = {
           stepId:     step.stepId,
           toolName:   step.toolName,
-          nodeId:     step.nodeId,
+          nodeId,
           dispatched,
           result,
-        });
+        };
+        stepResults.push(stepResult);
+        hooks.onStepComplete?.(stepResult);
+        if (dispatched === 'remote') {
+          try {
+            await this.audit.recordEvent({
+              eventType: 'DATA_TRANSFERRED',
+              traceId: baseCtx.traceId,
+              actorId: baseCtx.agentId,
+              subjectId: runId,
+              payload: { toolName: step.toolName, input: step.input },
+              metadata: { stepId: step.stepId, nodeId, toolName: step.toolName },
+              success: result.success,
+            });
+          } catch (error) {
+            console.error('[OrchestratorRunner] failed to persist DATA_TRANSFERRED event:', error);
+          }
+        }
+        if (result.success) outputs.set(step.stepId, result.output);
         if (!result.success) {
           failedIds.add(step.stepId);
           if (policy === 'fail-fast') aborted = true;
@@ -134,20 +181,19 @@ export class OrchestratorRunner {
 
   // ── Dispatch ────────────────────────────────────────────────────────────────
 
-  private async buildAddressMap(steps: PlanStep[]): Promise<Map<string, string>> {
+  private async buildNodeDirectory(steps: PlanStep[]): Promise<{ addresses: Map<string, string>; nodes: NodeDescriptor[] }> {
     const addresses = new Map(this.nodeAddresses);
-    if (!this.accountingUrl) return addresses;
+    if (!this.accountingUrl) return { addresses, nodes: [] };
 
-    // Only fetch if there are nodeIds not already covered by static map
-    const unknown = [...new Set(steps.map(s => s.nodeId))].filter(id => !addresses.has(id));
-    if (unknown.length === 0) return addresses;
+    // Always fetch: ensureNodeTool() needs canInstall/tool availability for discovered nodes
+    let nodes: NodeDescriptor[] = [];
 
     try {
       const res = await fetch(`${this.accountingUrl}/api/nodes`, {
         signal: AbortSignal.timeout(5_000),
       });
       if (res.ok) {
-        const nodes = await res.json() as Array<{ nodeId: string; agentUrl: string | null }>;
+        nodes = await res.json() as NodeDescriptor[];
         for (const { nodeId, agentUrl } of nodes) {
           if (agentUrl && !addresses.has(nodeId)) {
             addresses.set(nodeId, agentUrl);
@@ -158,22 +204,71 @@ export class OrchestratorRunner {
       // non-fatal: fall back to static addresses only
     }
 
-    return addresses;
+    return { addresses, nodes };
   }
 
   private async dispatchStep(
     step: PlanStep,
     ctx: ToolContext,
     addresses: Map<string, string>,
-  ): Promise<{ result: ToolResult; dispatched: 'local' | 'remote' }> {
-    const agentUrl = addresses.get(step.nodeId);
-    if (agentUrl) {
-      return { result: await this.remoteDispatch(agentUrl, step, ctx), dispatched: 'remote' };
+    nodes: NodeDescriptor[],
+  ): Promise<{ result: ToolResult; dispatched: 'local' | 'remote'; nodeId: string }> {
+    if (step.nodeId === 'local') {
+      return { result: await this.toolbox.execute(step.toolName as never, step.input, ctx), dispatched: 'local', nodeId: 'local' };
     }
-    return {
-      result: await this.toolbox.execute(step.toolName as never, step.input, ctx),
-      dispatched: 'local',
-    };
+
+    const target = await this.ensureNodeTool(step, addresses, nodes);
+    const agentUrl = target?.agentUrl;
+    if (agentUrl) {
+      return {
+        result: await this.remoteDispatch(agentUrl, { ...step, nodeId: target.nodeId }, ctx),
+        dispatched: 'remote',
+        nodeId: target.nodeId,
+      };
+    }
+    return { result: failure('AGENT_NOT_REGISTERED', `No online node can execute '${step.toolName}@${step.version}'`), dispatched: 'remote', nodeId: step.nodeId };
+  }
+
+  private async ensureNodeTool(
+    step: PlanStep,
+    addresses: Map<string, string>,
+    nodes: NodeDescriptor[],
+  ): Promise<{ nodeId: string; agentUrl: string } | null> {
+    const staticUrl = this.nodeAddresses.get(step.nodeId);
+    if (staticUrl) return { nodeId: step.nodeId, agentUrl: staticUrl };
+
+    const online = nodes
+      .filter(node => node.agentUrl && node.status !== 'offline')
+      .sort((a, b) => a.nodeId.localeCompare(b.nodeId));
+    const hasTool = (node: NodeDescriptor) => node.resources.some(
+      tool => tool.name === step.toolName && (tool.version ?? '1.0.0') === step.version,
+    );
+    const assigned = online.find(node => node.nodeId === step.nodeId);
+    const exact = assigned && hasTool(assigned) ? assigned : online.find(hasTool);
+    if (exact?.agentUrl) return { nodeId: exact.nodeId, agentUrl: exact.agentUrl };
+
+    const installable = assigned?.canInstall ? assigned : online.find(node => node.canInstall);
+    if (!installable?.agentUrl || !this.accountingUrl) return null;
+    try {
+      const res = await fetch(`${this.accountingUrl}/api/nodes/${encodeURIComponent(installable.nodeId)}/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ toolName: step.toolName, version: step.version }),
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!res.ok) return null;
+      const verify = await fetch(`${installable.agentUrl}/scripts`, { signal: AbortSignal.timeout(5_000) });
+      if (!verify.ok) return null;
+      const manifest = await verify.json() as { scripts?: Array<{ name: string; version?: string }> };
+      const installed = manifest.scripts?.some(
+        tool => tool.name === step.toolName && (tool.version ?? '1.0.0') === step.version,
+      );
+      if (!installed) return null;
+      this.piManifestCache.delete(installable.agentUrl);
+      return { nodeId: installable.nodeId, agentUrl: installable.agentUrl };
+    } catch {
+      return null;
+    }
   }
 
   private async remoteDispatch(
@@ -208,34 +303,21 @@ export class OrchestratorRunner {
       const durationMs = Date.now() - startedAt;
 
       if (!res.ok) {
-        return {
-          success:   false,
-          errorCode: 'HANDLER_EXECUTION_FAILED',
-          error:     `Remote node '${step.nodeId}' returned HTTP ${res.status}`,
-          durationMs,
-          executedAt,
-        };
+        return createToolFailure(
+          'HANDLER_EXECUTION_FAILED',
+          `Remote node '${step.nodeId}' returned HTTP ${res.status}`,
+          { durationMs, executedAt, details: { httpStatus: res.status, nodeId: step.nodeId } },
+        );
       }
 
       const body = await res.json() as unknown;
-      if (typeof body !== 'object' || body === null || typeof (body as ToolResult).success !== 'boolean') {
-        return {
-          success:   false,
-          errorCode: 'HANDLER_EXECUTION_FAILED',
-          error:     `Remote node '${step.nodeId}' returned unexpected response shape`,
-          durationMs,
-          executedAt,
-        };
-      }
-      return body as ToolResult;
+      return this.validateRemoteResult(body, step, durationMs, executedAt);
     } catch (err) {
-      return {
-        success:   false,
-        errorCode: 'HANDLER_EXECUTION_FAILED',
-        error:     `Dispatch to '${step.nodeId}' (${agentUrl}) failed: ${err instanceof Error ? err.message : String(err)}`,
-        durationMs:  Date.now() - startedAt,
-        executedAt:  new Date().toISOString(),
-      };
+      return createToolFailure(
+        'HANDLER_EXECUTION_FAILED',
+        `Dispatch to '${step.nodeId}' (${agentUrl}) failed: ${err instanceof Error ? err.message : String(err)}`,
+        { durationMs: Date.now() - startedAt, details: { nodeId: step.nodeId, agentUrl } },
+      );
     }
   }
 
@@ -260,24 +342,24 @@ export class OrchestratorRunner {
         signal: AbortSignal.timeout(5_000),
       });
       if (!mRes.ok) {
-        return {
-          success: false, errorCode: 'HANDLER_EXECUTION_FAILED',
-          error:   `Pi /scripts fetch failed: HTTP ${mRes.status}`,
-          durationMs: Date.now() - startedAt, executedAt,
-        };
+        return createToolFailure(
+          'HANDLER_EXECUTION_FAILED',
+          `Pi /scripts fetch failed: HTTP ${mRes.status}`,
+          { durationMs: Date.now() - startedAt, executedAt, details: { httpStatus: mRes.status } },
+        );
       }
-      const manifest = await mRes.json() as { scripts: Array<{ name: string; toolName: string }> };
-      toolMap = new Map(manifest.scripts.map(s => [s.toolName, s.name]));
+      const manifest = await mRes.json() as { scripts: Array<{ name: string; scriptName: string }> };
+      toolMap = new Map(manifest.scripts.map(s => [s.name, s.scriptName]));
       this.piManifestCache.set(agentUrl, toolMap);
     }
 
     const scriptName = toolMap.get(step.toolName);
     if (!scriptName) {
-      return {
-        success: false, errorCode: 'TOOL_NOT_FOUND',
-        error:   `Pi node has no script registered for toolName '${step.toolName}'`,
-        durationMs: Date.now() - startedAt, executedAt,
-      };
+      return createToolFailure(
+        'TOOL_NOT_FOUND',
+        `Pi node has no script registered for toolName '${step.toolName}'`,
+        { durationMs: Date.now() - startedAt, executedAt },
+      );
     }
 
     const res = await fetch(`${agentUrl}/execute`, {
@@ -289,22 +371,64 @@ export class OrchestratorRunner {
 
     const durationMs = Date.now() - startedAt;
     if (!res.ok) {
-      return {
-        success: false, errorCode: 'HANDLER_EXECUTION_FAILED',
-        error:   `Pi /execute returned HTTP ${res.status} for '${step.toolName}'`,
-        durationMs, executedAt: new Date().toISOString(),
-      };
+      return createToolFailure(
+        'HANDLER_EXECUTION_FAILED',
+        `Pi /execute returned HTTP ${res.status} for '${step.toolName}'`,
+        { durationMs, details: { httpStatus: res.status, nodeId: step.nodeId } },
+      );
     }
 
     const body = await res.json() as unknown;
-    if (typeof body !== 'object' || body === null || typeof (body as ToolResult).success !== 'boolean') {
-      return {
-        success: false, errorCode: 'HANDLER_EXECUTION_FAILED',
-        error:   `Pi /execute returned unexpected response shape for '${step.toolName}'`,
-        durationMs, executedAt: new Date().toISOString(),
-      };
+    return this.validateRemoteResult(body, step, durationMs, new Date().toISOString());
+  }
+
+  private validateRemoteResult(
+    body: unknown,
+    step: PlanStep,
+    durationMs: number,
+    executedAt: string,
+  ): ToolResult {
+    if (typeof body !== 'object' || body === null || typeof (body as { success?: unknown }).success !== 'boolean') {
+      return createToolFailure(
+        'HANDLER_EXECUTION_FAILED',
+        `Remote node '${step.nodeId}' returned unexpected response shape`,
+        { durationMs, executedAt, details: { nodeId: step.nodeId } },
+      );
     }
-    return body as ToolResult;
+
+    const result = body as Record<string, unknown>;
+    if (result['success'] === false) {
+      const errorCode = isHiBAErrorCode(result['errorCode']) ? result['errorCode'] : 'HANDLER_EXECUTION_FAILED';
+      const error = typeof result['error'] === 'string' ? result['error'] : `Remote tool '${step.toolName}' failed`;
+      return createToolFailure(errorCode, error, {
+        durationMs,
+        executedAt,
+        details: { nodeId: step.nodeId, remoteErrorCode: result['errorCode'] ?? null },
+      });
+    }
+
+    const tool = this.toolbox.getToolRegistry().get(step.toolName);
+    if (!tool) {
+      return createToolFailure('TOOL_NOT_FOUND', `Tool '${step.toolName}' is not registered locally for output validation`, {
+        durationMs,
+        executedAt,
+      });
+    }
+    const output = tool.outputSchema.safeParse(result['output']);
+    if (!output.success) {
+      return createToolFailure('OUTPUT_INVALID', output.error.issues.map(issue =>
+        `${issue.path.join('.') || '(root)'}: ${issue.message}`,
+      ).join('; '), { durationMs, executedAt, details: { nodeId: step.nodeId } });
+    }
+
+    return {
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: output.data,
+      auditHash: typeof result['auditHash'] === 'string' ? result['auditHash'] : '',
+      durationMs,
+      executedAt,
+    };
   }
 }
 
@@ -356,6 +480,32 @@ function partition<T>(arr: T[], pred: (x: T) => boolean): [T[], T[]] {
   const no: T[] = [];
   for (const x of arr) (pred(x) ? yes : no).push(x);
   return [yes, no];
+}
+
+function resolveStepReferences(value: unknown, outputs: Map<string, unknown>): unknown {
+  if (typeof value === 'string') {
+    const match = /^\$steps\.([^.]+)\.output(?:\.(.+))?$/.exec(value);
+    if (!match) return value;
+    const stepId = match[1]!;
+    if (!outputs.has(stepId)) throw new Error(`Step output '${stepId}' is not available`);
+    let resolved = outputs.get(stepId);
+    for (const part of match[2]?.split('.') ?? []) {
+      if (resolved === null || typeof resolved !== 'object' || !(part in resolved)) {
+        throw new Error(`Step output reference '${value}' does not exist`);
+      }
+      resolved = (resolved as Record<string, unknown>)[part];
+    }
+    return resolved;
+  }
+  if (Array.isArray(value)) return value.map(item => resolveStepReferences(item, outputs));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, resolveStepReferences(item, outputs)]));
+  }
+  return value;
+}
+
+function failure(errorCode: 'SCHEMA_VALIDATION_ERROR' | 'AGENT_NOT_REGISTERED', error: string): ToolResult {
+  return createToolFailure(errorCode, error);
 }
 
 function mkResult(

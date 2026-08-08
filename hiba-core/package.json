@@ -5,7 +5,14 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
+    "start": "node tools/start.mjs",
+    "start:smoke": "node tools/start.mjs --smoke",
     "accounting": "node tools/accounting-server.mjs",
+    "tools:sync": "node --require ts-node/register tools/sync-tool-manifest.ts",
+    "tools:check": "node --require ts-node/register tools/sync-tool-manifest.ts --check",
+    "test:subweb-schema": "node tools/test-subweb-schema.mjs",
+    "dataset:v1": "node tools/gen-training-data.mjs",
+    "dataset:validate": "node tools/validate-dataset.mjs training/data/hiba-v1-train.jsonl training/data/hiba-v1-eval.jsonl",
     "typecheck": "tsc --noEmit",
     "test": "node --test --require ts-node/register hiba.toolbox.test.ts hiba.audit.sqlite.test.ts"
   },

@@ -1,5 +1,9 @@
 import { z } from 'zod';
 
+export const HIBA_PROTOCOL_VERSION = '1.0' as const;
+export type HiBAProtocolVersion = typeof HIBA_PROTOCOL_VERSION;
+export type JsonSchema = Record<string, unknown>;
+
 // ── Error Codes ───────────────────────────────────────────────────────────────
 
 export type HiBAErrorCode =
@@ -10,7 +14,18 @@ export type HiBAErrorCode =
   | 'AUDIT_ANCHOR_FAILED'
   | 'TOOL_TIMEOUT'
   | 'MAX_DEPTH_EXCEEDED'
-  | 'HANDLER_EXECUTION_FAILED';
+  | 'HANDLER_EXECUTION_FAILED'
+  | 'NODE_OFFLINE'
+  | 'VERSION_INCOMPATIBLE'
+  | 'INPUT_REQUIRED'
+  | 'INPUT_INVALID'
+  | 'OUTPUT_INVALID'
+  | 'DEPENDENCY_FAILED'
+  | 'REQUEST_INVALID'
+  | 'RESOURCE_NOT_FOUND'
+  | 'SERVICE_UNAVAILABLE'
+  | 'CONFLICT'
+  | 'INTERNAL_ERROR';
 
 // ── Tool Domain / Permission Types ───────────────────────────────────────────
 
@@ -72,15 +87,40 @@ export interface AuditRecord {
 // ── NodeCapability ────────────────────────────────────────────────────────────
 
 export interface NodeCapability {
+  protocolVersion: HiBAProtocolVersion;
   nodeId: string;
+  status: 'online' | 'offline';
+  lastSeenAt: string | null;
   tools: Array<{ name: string; version: string }>;
   canInstall: boolean;
+}
+
+export interface ResourceItem {
+  name: string;
+  version: string;
+  type: string;
+  path?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export type NodeResourceMap = Record<string, ResourceItem[]>;
+
+export interface NodeDescriptor {
+  protocolVersion: HiBAProtocolVersion;
+  nodeId: string;
+  agentUrl: string | null;
+  status: 'online' | 'offline';
+  canInstall: boolean;
+  resources: ResourceItem[];
+  registeredAt: string | null;
+  lastSeenAt: string | null;
 }
 
 // ── Tool Result ───────────────────────────────────────────────────────────────
 
 export interface ToolSuccess<T = unknown> {
   success: true;
+  protocolVersion: HiBAProtocolVersion;
   output: T;
   auditHash: string;
   durationMs: number;
@@ -89,8 +129,11 @@ export interface ToolSuccess<T = unknown> {
 
 export interface ToolFailure {
   success: false;
+  protocolVersion: HiBAProtocolVersion;
   errorCode: HiBAErrorCode;
   error: string;
+  retryable: boolean;
+  details?: Record<string, unknown>;
   auditHash?: string;
   durationMs: number;
   executedAt: string;
@@ -125,26 +168,49 @@ export interface ToolDefinition<
   handler: (input: z.infer<TInput>, ctx: ToolContext) => Promise<z.infer<TOutput>>;
 }
 
+export interface ToolSpec {
+  protocolVersion: HiBAProtocolVersion;
+  name: ToolName;
+  version: string;
+  description: string;
+  tags: [ToolDomain, ToolAction, ...string[]];
+  inputSchema: JsonSchema;
+  outputSchema: JsonSchema;
+  permissions: ToolPermission[];
+  timeoutMs: number;
+  retryPolicy?: RetryPolicy;
+}
+
 // ── Execution Plan ────────────────────────────────────────────────────────────
 
 export interface ExecutionPlan {
+  protocolVersion?: HiBAProtocolVersion;
   steps: PlanStep[];
   supervisorPolicy: 'fail-fast' | 'partial-success';
   error?: string;
+  validationIssues?: PlanValidationIssue[];
+  missingInputs?: MissingPlanInput[];
 }
+
+export interface PlanValidationIssue {
+  stepId?: string;
+  code: HiBAErrorCode;
+  field?: string;
+  message: string;
+}
+
+export interface MissingPlanInput {
+  stepId: string;
+  toolName: ToolName;
+  fields: string[];
+}
+
+export type PlanValidationResult =
+  | { valid: true; plan: ExecutionPlan }
+  | { valid: false; issues: PlanValidationIssue[]; missingInputs: MissingPlanInput[] };
 
 // ── Audit Writer ──────────────────────────────────────────────────────────────
 
 export interface AuditWriter {
   write(record: AuditRecord): Promise<void>;
 }
-
-// ── Node Resource ─────────────────────────────────────────────────────────────
-
-export interface ResourceItem {
-  name: string;
-  version: string;
-  type: string;
-}
-
-export type NodeResourceMap = Record<string, ResourceItem[]>;

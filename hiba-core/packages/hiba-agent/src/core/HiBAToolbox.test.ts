@@ -35,6 +35,24 @@ function createTimeoutError(): Error & { errorCode: HiBAErrorCode } {
 }
 
 describe('HiBAToolbox', () => {
+  it('rejects duplicate tool names instead of silently replacing them', () => {
+    const toolbox = new HiBAToolbox({ auditWriter: createAuditWriter() });
+    const tool = defineTool({
+      name: 'material.readFile',
+      version: '1.0.0',
+      tags: ['material', 'read'],
+      description: 'Read file',
+      inputSchema: z.object({ filePath: z.string() }),
+      outputSchema: z.object({ content: z.string() }),
+      permissions: ['material.read'],
+      timeout: 1_000,
+      handler: async input => ({ content: input.filePath }),
+    });
+
+    toolbox.register(tool);
+    expect(() => toolbox.register(tool)).toThrow("already registered");
+  });
+
   it('executes a registered tool and returns ToolSuccess with non-empty auditHash', async () => {
     const auditWriter = createAuditWriter();
     const toolbox = new HiBAToolbox({ auditWriter });
@@ -198,6 +216,56 @@ describe('HiBAToolbox', () => {
     expect(auditWriter.records[0]?.success).toBe(false);
     expect(auditWriter.records[0]?.errorMsg).toBe('handler failed');
     expect(auditWriter.records[0]?.auditHash).toEqual(expect.any(String));
+  });
+
+  it('rejects handler output that does not match outputSchema', async () => {
+    const auditWriter = createAuditWriter();
+    const toolbox = new HiBAToolbox({ auditWriter });
+    toolbox.register(defineTool({
+      name: 'material.readFile',
+      version: '1.0.0',
+      tags: ['material', 'read'],
+      description: 'Read file',
+      inputSchema: z.object({ filePath: z.string() }),
+      outputSchema: z.object({ content: z.string() }),
+      permissions: ['material.read'],
+      timeout: 1_000,
+      handler: async () => ({ content: 123 } as never),
+    }));
+
+    const result = await toolbox.execute('material.readFile', { filePath: '/tmp/a.txt' }, baseCtx);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.protocolVersion).toBe('1.0');
+      expect(result.errorCode).toBe('OUTPUT_INVALID');
+      expect(result.retryable).toBe(false);
+    }
+  });
+
+  it('marks timeout failures as retryable in the shared error contract', async () => {
+    const auditWriter = createAuditWriter();
+    const toolbox = new HiBAToolbox({ auditWriter });
+    toolbox.register(defineTool({
+      name: 'material.readFile',
+      version: '1.0.0',
+      tags: ['material', 'read'],
+      description: 'Read file',
+      inputSchema: z.object({ filePath: z.string() }),
+      outputSchema: z.object({ content: z.string() }),
+      permissions: ['material.read'],
+      timeout: 1_000,
+      retryPolicy: { maxAttempts: 1, initialDelayMs: 0, backoffMultiplier: 1, retryOn: ['TOOL_TIMEOUT'] },
+      handler: async () => { throw createTimeoutError(); },
+    }));
+
+    const result = await toolbox.execute('material.readFile', { filePath: '/tmp/a.txt' }, baseCtx);
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.errorCode).toBe('TOOL_TIMEOUT');
+      expect(result.retryable).toBe(true);
+    }
   });
 
   it('retries TOOL_TIMEOUT according to retryPolicy and returns ToolSuccess after retry succeeds', async () => {
