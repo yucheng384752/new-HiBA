@@ -122,7 +122,7 @@ export function registerAuditTools(toolbox: HiBAToolbox, audit: AuditTrail): voi
     timeout: 30_000,
     handler: async (input, ctx) => {
       const records = audit.queryUnanchored(input.limit);
-      const events = audit.queryUnanchoredEvents(Math.max(0, input.limit - records.length));
+      const events = audit.queryUnanchoredEvents(input.limit);
       const pending = [...records, ...events];
       if (pending.length === 0) {
         return { anchored: 0, txHash: null, skipped: 0 };
