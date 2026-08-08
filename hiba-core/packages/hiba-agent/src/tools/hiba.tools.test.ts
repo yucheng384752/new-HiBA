@@ -24,8 +24,8 @@ function makeToolbox(): HiBAToolbox {
 }
 
 describe('allHibaTools', () => {
-  test('exports 32 tools', () => {
-    expect(allHibaTools).toHaveLength(32);
+  test('exports 33 tools', () => {
+    expect(allHibaTools).toHaveLength(33);
   });
 
   test('all tool names are unique', () => {
@@ -44,9 +44,9 @@ describe('registerHibaTools', () => {
   let toolbox: HiBAToolbox;
   beforeEach(() => { toolbox = makeToolbox(); });
 
-  test('registers all 32 tools into the toolbox', () => {
+  test('registers all 33 tools into the toolbox', () => {
     registerHibaTools(toolbox);
-    expect(toolbox.list()).toHaveLength(32);
+    expect(toolbox.list()).toHaveLength(33);
   });
 
   test('material.protectFile is registered', () => {

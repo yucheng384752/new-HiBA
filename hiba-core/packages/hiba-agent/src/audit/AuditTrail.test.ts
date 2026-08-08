@@ -144,6 +144,47 @@ describe('AuditTrail', () => {
     expect(records).toEqual([first, second]);
   });
 
+  it('records critical events as hashes without persisting the raw payload', async () => {
+    const auditTrail = new AuditTrail(':memory:');
+    const event = await auditTrail.recordEvent({
+      eventType: 'WORKFLOW_APPROVED',
+      traceId: 'trace-workflow',
+      actorId: 'user-7',
+      subjectId: 'wf-7',
+      payload: { secret: 'must-not-be-stored', plan: { steps: 2 } },
+      metadata: { stepCount: 2 },
+    });
+
+    const records = await auditTrail.queryEvents({ subjectId: 'wf-7' });
+    expect(records).toEqual([event]);
+    expect(event.payloadHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(event.eventHash).toMatch(/^[0-9a-f]{64}$/);
+    expect(JSON.stringify(records)).not.toContain('must-not-be-stored');
+  });
+
+  it('anchors tool audits and critical events in one transaction', async () => {
+    const auditTrail = new AuditTrail(':memory:');
+    await auditTrail.write(createRecord());
+    await auditTrail.recordEvent({
+      eventType: 'WORKFLOW_CREATED',
+      traceId: 'trace-001',
+      actorId: 'agent-001',
+      subjectId: 'wf-001',
+      payload: { steps: [] },
+    });
+    jest.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      json: async () => ({ anchored: 2, txHash: '0xanchor' }),
+    } as Response);
+
+    const result = await auditTrail.batchUploadToChain(['trace-001'], ctx);
+
+    expect(result?.anchored).toBe(2);
+    expect(auditTrail.queryUnanchored()).toHaveLength(0);
+    expect(auditTrail.queryUnanchoredEvents()).toHaveLength(0);
+    expect((await auditTrail.queryEvents({ traceId: 'trace-001' }))[0]?.anchorTxHash).toBe('0xanchor');
+  });
+
   it('batchUploadToChain does not call fetch when no records match traceIds', async () => {
     const auditTrail = new AuditTrail(':memory:');
     const fetchMock = jest.fn();

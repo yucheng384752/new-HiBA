@@ -1,17 +1,22 @@
 import { z } from 'zod';
+import { zodToJsonSchema } from 'zod-to-json-schema';
 import type {
   RetryPolicy,
   ToolAction,
   ToolDefinition,
   ToolDomain,
   ToolName,
+  ToolPermission,
   HiBAErrorCode,
+  ToolSpec,
 } from '../types/hiba.types';
+import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
 
 export type RegisteredTool<
   TInput extends z.ZodType = z.ZodType,
   TOutput extends z.ZodType = z.ZodType,
-> = ToolDefinition<TInput, TOutput> & {
+> = Omit<ToolDefinition<TInput, TOutput>, 'retryPolicy'> & {
+  retryPolicy: RetryPolicy;
   registeredAt: number;
 };
 
@@ -38,11 +43,62 @@ export function defineTool<TInput extends z.ZodType, TOutput extends z.ZodType>(
 ): RegisteredTool<TInput, TOutput> {
   validateToolName(definition.name);
   validateTags(definition.tags);
+  validateDefinition(definition);
 
   return {
     ...definition,
     retryPolicy: normalizeRetryPolicy(definition.retryPolicy),
     registeredAt: Date.now(),
+  };
+}
+
+function validateDefinition<TInput extends z.ZodType, TOutput extends z.ZodType>(
+  definition: ToolDefinition<TInput, TOutput>,
+): void {
+  const [domain, action] = definition.tags;
+  const nameDomain = definition.name.split('.')[0];
+  if (nameDomain !== domain) {
+    throw new Error(`Invalid tool '${definition.name}': name domain must match tags[0] '${domain}'`);
+  }
+
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(definition.version)) {
+    throw new Error(`Invalid tool version '${definition.version}': expected SemVer`);
+  }
+
+  const requiredPermission = `${domain}.${action}` as ToolPermission;
+  if (!definition.permissions.includes(requiredPermission)) {
+    throw new Error(`Invalid tool '${definition.name}': permissions must include '${requiredPermission}'`);
+  }
+  if (definition.permissions.some(permission => !permission.startsWith(`${domain}.`))) {
+    throw new Error(`Invalid tool '${definition.name}': permissions must stay in domain '${domain}'`);
+  }
+
+  if (!Number.isInteger(definition.timeout) || definition.timeout <= 0) {
+    throw new Error(`Invalid tool '${definition.name}': timeout must be a positive integer`);
+  }
+
+  const retry = definition.retryPolicy;
+  if (retry && (
+    !Number.isInteger(retry.maxAttempts) || retry.maxAttempts < 1
+    || !Number.isInteger(retry.initialDelayMs) || retry.initialDelayMs < 0
+    || !Number.isFinite(retry.backoffMultiplier) || retry.backoffMultiplier < 1
+  )) {
+    throw new Error(`Invalid tool '${definition.name}': retryPolicy values are out of range`);
+  }
+}
+
+export function toToolSpec(tool: RegisteredTool): ToolSpec {
+  return {
+    protocolVersion: HIBA_PROTOCOL_VERSION,
+    name: tool.name,
+    version: tool.version,
+    description: tool.description,
+    tags: tool.tags,
+    inputSchema: zodToJsonSchema(tool.inputSchema, { $refStrategy: 'none' }),
+    outputSchema: zodToJsonSchema(tool.outputSchema, { $refStrategy: 'none' }),
+    permissions: tool.permissions,
+    timeoutMs: tool.timeout,
+    retryPolicy: tool.retryPolicy,
   };
 }
 

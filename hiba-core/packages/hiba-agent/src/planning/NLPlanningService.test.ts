@@ -5,7 +5,10 @@ import {
   type AccountingClient,
   type NodeResourceMap,
 } from './NLPlanningService';
-import type { ToolContext } from '../types/hiba.types';
+import { z } from 'zod';
+import { defineTool } from '../core/defineTool';
+import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
+import type { NodeDescriptor, ToolContext } from '../types/hiba.types';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -18,9 +21,32 @@ const ctx: ToolContext = {
 };
 
 const mockResources: NodeResourceMap = {
-  node1: [{ name: 'model_121_321', type: 'model', version: '1.0.0' }],
+  node1: [{ name: 'material.protectFile', type: 'tool', version: '1.0.0' }],
   node8: [{ name: 'model_111_211', type: 'model', version: '2.0.0' }],
 };
+
+const mockNodes: NodeDescriptor[] = Object.entries(mockResources).map(([nodeId, resources]) => ({
+  protocolVersion: HIBA_PROTOCOL_VERSION,
+  nodeId,
+  agentUrl: `http://${nodeId}`,
+  status: 'online',
+  canInstall: false,
+  resources,
+  registeredAt: '2026-01-01T00:00:00.000Z',
+  lastSeenAt: '2026-01-01T00:00:00.000Z',
+}));
+
+const protectFileTool = defineTool({
+  name: 'material.protectFile',
+  version: '1.0.0',
+  tags: ['material', 'write'],
+  description: 'Protect file',
+  inputSchema: z.object({ filePath: z.string() }),
+  outputSchema: z.object({ ok: z.boolean() }),
+  permissions: ['material.write'],
+  timeout: 1_000,
+  handler: async () => ({ ok: true }),
+});
 
 const validPlanJson = {
   steps: [
@@ -46,6 +72,7 @@ function makeAccounting(resources: NodeResourceMap = mockResources): jest.Mocked
   return {
     listNodeResources: jest.fn<AccountingClient['listNodeResources']>().mockResolvedValue(resources),
     getNodeResources:  jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
+    listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(mockNodes),
   };
 }
 
@@ -77,17 +104,44 @@ describe('NLPlanningService', () => {
     );
   });
 
-  it('includes toolbox tool names in LLM payload when toolbox is provided', async () => {
+  it('includes complete ToolSpec in LLM payload when toolbox is provided', async () => {
     const llm = makeLLM(validPlanJson);
     const svc = new NLPlanningService(llm, makeAccounting(), {
-      toolbox: { list: () => [{ name: 'material.protectFile' }, { name: 'material.readFile' }] },
+      toolbox: { list: () => [protectFileTool] },
     });
 
     await svc.plan('task', ctx);
 
     expect(llm.complete).toHaveBeenCalledWith(
-      expect.objectContaining({ availableTools: ['material.protectFile', 'material.readFile'] }),
+      expect.objectContaining({
+        nodes: mockNodes,
+        tools: [expect.objectContaining({
+          protocolVersion: HIBA_PROTOCOL_VERSION,
+          name: 'material.protectFile',
+          inputSchema: expect.objectContaining({ type: 'object' }),
+        })],
+      }),
     );
+  });
+
+  it('returns structured missingInputs when deterministic validation rejects a plan', async () => {
+    const invalidInputPlan = {
+      ...validPlanJson,
+      steps: [{ ...validPlanJson.steps[0], input: {} }],
+    };
+    const svc = new NLPlanningService(makeLLM(invalidInputPlan), makeAccounting(), {
+      toolbox: { list: () => [protectFileTool] },
+    });
+
+    const plan = await svc.plan('protect a file', ctx);
+
+    expect(plan.steps).toEqual([]);
+    expect(plan.validationIssues).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'INPUT_REQUIRED', field: 'filePath' }),
+    ]));
+    expect(plan.missingInputs).toEqual([
+      { stepId: 'S1', toolName: 'material.protectFile', fields: ['filePath'] },
+    ]);
   });
 
   it('returns error plan when LLM output is not a valid ExecutionPlan shape', async () => {
@@ -108,6 +162,21 @@ describe('NLPlanningService', () => {
     expect(plan.error).toBeDefined();
   });
 
+  it('rejects a plan with an unknown dependency before execution', async () => {
+    const svc = new NLPlanningService(makeLLM({
+      steps: [{
+        stepId: 'S1', toolName: 'material.readFile', nodeId: 'node1',
+        version: '1.0.0', input: {}, dependsOn: ['missing'],
+      }],
+      supervisorPolicy: 'fail-fast',
+    }), makeAccounting());
+
+    const plan = await svc.plan('task', ctx);
+
+    expect(plan.steps).toHaveLength(0);
+    expect(plan.error).toContain('Unknown dependency');
+  });
+
   it('uses configured supervisorPolicy as fallback in error plan', async () => {
     const svc = new NLPlanningService(
       makeLLM('bad'),
@@ -125,6 +194,7 @@ describe('NLPlanningService', () => {
       listNodeResources: jest.fn<AccountingClient['listNodeResources']>()
         .mockRejectedValue(new Error('accounting timeout')),
       getNodeResources: jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
+      listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(mockNodes),
     };
 
     await expect(

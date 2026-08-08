@@ -17,12 +17,16 @@
 
 import { test, expect, beforeAll, afterAll } from '@jest/globals';
 import http from 'node:http';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { z } from 'zod';
 import { AgentServer } from './AgentServer';
 import { HiBAToolbox } from '../core/HiBAToolbox';
 import { AuditTrail } from '../audit/AuditTrail';
 import { TrustRegistry } from '../trust/TrustRegistry';
 import { OrchestratorRunner } from './OrchestratorRunner';
+import { WorkflowStore } from './WorkflowStore';
 import { defineTool } from '../core/defineTool';
 import type { LLMClient, AccountingClient } from '../planning/NLPlanningService';
 import { NLPlanningService } from '../planning/NLPlanningService';
@@ -81,6 +85,16 @@ const mockAccounting: AccountingClient = {
   getNodeResources: async (nodeId) => (nodeId === 'node-1'
     ? [{ name: 'cut.sh', type: 'script', version: '1.0.0' }]
     : []),
+  listNodes: async () => [{
+    protocolVersion: '1.0',
+    nodeId: 'node-1',
+    agentUrl: 'http://node-1',
+    status: 'online',
+    canInstall: false,
+    resources: [{ name: 'material.protectFile', type: 'tool', version: '1.0.0' }],
+    registeredAt: '2026-01-01T00:00:00.000Z',
+    lastSeenAt: '2026-01-01T00:00:00.000Z',
+  }],
 };
 
 function makeToolbox() {
@@ -121,11 +135,14 @@ beforeAll(async () => {
   const { toolbox, audit } = makeToolbox();
   registry = new TrustRegistry(':memory:');
   const orchestrator = new OrchestratorRunner(toolbox, audit);
+  const workflowStore = new WorkflowStore(':memory:');
   server = new AgentServer(planning, {
     port,
     toolbox,
     registry,
     orchestrator,
+    workflowStore,
+    auditTrail: audit,
     defaultCtx: {
       hibaBaseUrl: 'http://localhost:8092',
       permissions: ['material.write', 'material.read'],
@@ -156,17 +173,93 @@ test('GET /api/resources proxies accounting client', async () => {
   expect(Array.isArray(body['node-1'])).toBe(true);
 });
 
+test('POST /api/update writes update payload and rejects path traversal', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'hiba-update-'));
+  const oldDir = process.env['HIBA_UPDATE_DIR'];
+  process.env['HIBA_UPDATE_DIR'] = dir;
+  try {
+    const ok = await request(port, 'POST', '/api/update', {
+      fileName: 'patch.txt',
+      content: 'hello node',
+    });
+    expect(ok.status).toBe(200);
+    expect(await readFile(join(dir, 'patch.txt'), 'utf8')).toBe('hello node');
+
+    const bad = await request(port, 'POST', '/api/update', {
+      fileName: '../patch.txt',
+      content: 'nope',
+    });
+    expect(bad.status).toBe(400);
+  } finally {
+    if (oldDir === undefined) delete process.env['HIBA_UPDATE_DIR'];
+    else process.env['HIBA_UPDATE_DIR'] = oldDir;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('POST /api/blockchain/protect stores file metadata and returns txHash', async () => {
+  const res = await request(port, 'POST', '/api/blockchain/protect', {
+    filePath: '/opt/models/model-a.xml',
+    metadata: { uploader: 'agent-test' },
+  }, {
+    'X-Trace-Id': 'trace-blockchain-001',
+  });
+  expect(res.status).toBe(200);
+  const body = res.body as {
+    success: boolean; txHash: string; fileHash: string; blockHash: string; mode: string;
+  };
+  expect(body.success).toBe(true);
+  expect(body.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(body.fileHash).toMatch(/^[0-9a-f]{64}$/);
+  expect(body.blockHash).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(body.mode).toBe('mock');
+});
+
+test('POST /api/blockchain/verify validates a protected file', async () => {
+  const protect = await request(port, 'POST', '/api/blockchain/protect', {
+    filePath: '/opt/models/model-b.xml',
+  });
+  const protectedBody = protect.body as { fileHash: string; txHash: string };
+
+  const verify = await request(port, 'POST', '/api/blockchain/verify', {
+    filePath: '/opt/models/model-b.xml',
+    expectedHash: protectedBody.fileHash,
+  });
+  expect(verify.status).toBe(200);
+  const body = verify.body as { valid: boolean; txHash: string };
+  expect(body.valid).toBe(true);
+  expect(body.txHash).toBe(protectedBody.txHash);
+});
+
+test('POST /api/audit/anchor returns txHash-compatible anchor response', async () => {
+  const res = await request(port, 'POST', '/api/audit/anchor', {
+    records: [{ auditHash: 'abc', traceId: 'trace-anchor-001' }],
+  }, {
+    'X-Trace-Id': 'trace-anchor-001',
+  });
+  expect(res.status).toBe(200);
+  const body = res.body as { anchored: number; txHash: string; blockHash: string; mode: string };
+  expect(body.anchored).toBe(1);
+  expect(body.txHash).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(body.blockHash).toMatch(/^0x[0-9a-f]{64}$/);
+  expect(body.mode).toBe('mock');
+});
+
 // ── /api/tools ─────────────────────────────────────────────────────────────────
 
 test('GET /api/tools returns registered tool metadata', async () => {
   const res = await request(port, 'GET', '/api/tools');
   expect(res.status).toBe(200);
   const tools = res.body as Array<{
-    name: string; version: string; tags: string[]; permissions: string[];
+    protocolVersion: string; name: string; version: string; tags: string[];
+    permissions: string[]; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown>;
   }>;
   expect(Array.isArray(tools)).toBe(true);
   expect(tools.length).toBe(1);
   expect(tools[0]?.name).toBe('material.protectFile');
+  expect(tools[0]?.protocolVersion).toBe('1.0');
+  expect(tools[0]?.inputSchema).toEqual(expect.objectContaining({ type: 'object', required: ['filePath'] }));
+  expect(tools[0]?.outputSchema).toEqual(expect.objectContaining({ type: 'object' }));
   expect(tools[0]?.tags).toContain('material');
   expect(tools[0]?.permissions).toContain('material.write');
 });
@@ -244,6 +337,61 @@ test('POST /api/plan with valid task returns ExecutionPlan', async () => {
 test('POST /api/plan without task returns 400', async () => {
   const res = await request(port, 'POST', '/api/plan', {});
   expect(res.status).toBe(400);
+  expect(res.body).toEqual(expect.objectContaining({
+    success: false,
+    protocolVersion: '1.0',
+    errorCode: 'REQUEST_INVALID',
+    retryable: false,
+  }));
+});
+
+test('persistent workflow closes plan, run, poll, and result loop', async () => {
+  const planned = await request(port, 'POST', '/api/plan', { task: 'protect a file' });
+  const workflowId = (planned.body as { workflowId: string }).workflowId;
+  expect(workflowId).toMatch(/^wf-/);
+
+  const beforeApproval = await request(port, 'POST', `/api/workflows/${workflowId}/run`, {});
+  expect(beforeApproval.status).toBe(409);
+
+  const approval = await request(port, 'POST', `/api/workflows/${workflowId}/approve`, {
+    plan: {
+      steps: [{
+        stepId: 'S1', toolName: 'material.protectFile', nodeId: 'local', version: '1.0.0',
+        input: { filePath: '/opt/persistent.xml' }, dependsOn: [],
+      }],
+      supervisorPolicy: 'fail-fast',
+    },
+  }, {
+    'X-User-Id': 'user-approver-1',
+  });
+  expect(approval.status).toBe(200);
+  expect(approval.body).toEqual(expect.objectContaining({
+    workflowId,
+    status: 'approved',
+    approvedBy: 'user-approver-1',
+    eventHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+  }));
+
+  const events = await request(port, 'GET', `/api/audit/events?subjectId=${workflowId}`);
+  expect(events.status).toBe(200);
+  expect((events.body as Array<{ eventType: string; integrityValid: boolean }>).every(event => event.integrityValid)).toBe(true);
+  expect((events.body as Array<{ eventType: string }>).map(event => event.eventType)).toEqual([
+    'WORKFLOW_CREATED',
+    'WORKFLOW_APPROVED',
+  ]);
+
+  const run = await request(port, 'POST', `/api/workflows/${workflowId}/run`, {});
+  expect(run.status).toBe(202);
+
+  let workflow: { status: string; result?: { succeeded: number } | null } | undefined;
+  for (let i = 0; i < 50; i++) {
+    const response = await request(port, 'GET', `/api/workflows/${workflowId}`);
+    workflow = response.body as typeof workflow;
+    if (workflow && ['succeeded', 'failed', 'partial_success'].includes(workflow.status)) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  expect(workflow?.status).toBe('succeeded');
+  expect(workflow?.result?.succeeded).toBe(1);
 });
 
 // ── /api/agents ────────────────────────────────────────────────────────────────
@@ -364,7 +512,7 @@ function planStep(
   input: Record<string, unknown> = {},
   dependsOn: string[] = [],
 ) {
-  return { stepId, toolName, nodeId: 'node-1', version: '1.0.0', input, dependsOn };
+  return { stepId, toolName, nodeId: 'local', version: '1.0.0', input, dependsOn };
 }
 
 test('POST /api/run all steps succeed → 200, succeeded=1', async () => {

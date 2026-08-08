@@ -1,3 +1,4 @@
+import type { NodeDescriptor, ToolSpec } from '../types/hiba.types';
 import type { LLMClient, LLMPayload, NodeResourceMap } from './NLPlanningService';
 
 // ── Options ───────────────────────────────────────────────────────────────────
@@ -12,7 +13,11 @@ export interface HttpLLMClientOptions {
    */
   format?: 'openai' | 'ollama';
   /** Replace the entire system prompt builder — gives maximum flexibility */
-  systemPromptTemplate?: (resources: NodeResourceMap, tools: string[]) => string;
+  systemPromptTemplate?: (
+    resources: NodeResourceMap,
+    nodes: NodeDescriptor[],
+    tools: ToolSpec[],
+  ) => string;
 }
 
 // ── HttpLLMClient ─────────────────────────────────────────────────────────────
@@ -26,8 +31,8 @@ export class HttpLLMClient implements LLMClient {
   async complete(payload: LLMPayload): Promise<{ rawJson: unknown }> {
     const system = payload.systemPrompt
       ?? (this.options.systemPromptTemplate
-          ? this.options.systemPromptTemplate(payload.resources, payload.availableTools)
-          : buildDefaultSystemPrompt(payload.resources, payload.availableTools));
+          ? this.options.systemPromptTemplate(payload.resources, payload.nodes, payload.tools)
+          : buildDefaultSystemPrompt(payload.resources, payload.nodes, payload.tools));
 
     const body = this.options.format === 'ollama'
       ? this.ollamaBody(system, payload.task)
@@ -88,7 +93,11 @@ function tryParseJson(text: string): unknown {
   return text;
 }
 
-function buildDefaultSystemPrompt(resources: NodeResourceMap, tools: string[]): string {
+function buildDefaultSystemPrompt(
+  resources: NodeResourceMap,
+  nodes: NodeDescriptor[],
+  tools: ToolSpec[],
+): string {
   const resourceBlock = Object.entries(resources).length
     ? Object.entries(resources)
         .map(([id, items]) =>
@@ -96,8 +105,18 @@ function buildDefaultSystemPrompt(resources: NodeResourceMap, tools: string[]): 
         .join('\n')
     : '  (no nodes registered)';
 
+  const nodeBlock = nodes.length
+    ? nodes.map(node =>
+        `  ${node.nodeId}: status=${node.status}, canInstall=${String(node.canInstall)}, tools=${node.resources.map(resource => `${resource.name}@${resource.version}`).join(', ')}`,
+      ).join('\n')
+    : '  (no nodes registered)';
+
   const toolBlock = tools.length
-    ? tools.map(t => `  - ${t}`).join('\n')
+    ? tools.map(tool => [
+        `  - ${tool.name}@${tool.version}: ${tool.description}`,
+        `    inputSchema: ${JSON.stringify(tool.inputSchema)}`,
+        `    outputSchema: ${JSON.stringify(tool.outputSchema)}`,
+      ].join('\n')).join('\n')
     : '  (no tools registered)';
 
   return `You are a HiBA workflow planner for a hierarchical distributed AI agent system.
@@ -106,11 +125,15 @@ Convert the user's natural language task into a structured JSON execution plan.
 ## Available Nodes and Resources
 ${resourceBlock}
 
+## Live Node Descriptors
+${nodeBlock}
+
 ## Available Tools
 ${toolBlock}
 
 ## Output — return ONLY valid JSON, no markdown wrapper, no explanation:
 {
+  "protocolVersion": "1.0",
   "steps": [
     {
       "stepId":    "S1",
@@ -125,10 +148,11 @@ ${toolBlock}
 }
 
 ## Rules
-1. toolName must be from the Available Tools list
-2. nodeId must be a node from Available Nodes list
+1. toolName and version must exactly match an Available Tools entry
+2. nodeId must be an online node that advertises the tool, or an online node with canInstall=true
 3. stepId must be unique: S1, S2, S3, ...
 4. dependsOn lists stepIds that must complete before this step
-5. input keys must match the tool's expected parameters
-6. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
+5. input must validate against the tool's inputSchema; never invent parameter names
+6. protocolVersion must be "1.0"
+7. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
 }
