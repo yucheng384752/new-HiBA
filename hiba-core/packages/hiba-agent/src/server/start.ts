@@ -21,8 +21,9 @@ async function main(): Promise<void> {
   const llm = new HttpLLMClient(
     env('LLM_URL', 'http://localhost:11434/v1/chat/completions'),
     {
-      model:  env('LLM_MODEL',  'hiba-planner'),
-      format: env('LLM_FORMAT', 'openai') as 'openai' | 'ollama',
+      model:       env('LLM_MODEL',  'hiba-planner'),
+      format:      env('LLM_FORMAT', 'openai') as 'openai' | 'ollama',
+      temperature: process.env['LLM_TEMPERATURE'] !== undefined ? Number(process.env['LLM_TEMPERATURE']) : undefined,
     },
   );
 
