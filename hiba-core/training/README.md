@@ -1,98 +1,22 @@
-# HiBA Planner — Training Pipeline
+# HiBA Planner v1：Llama 3.1 + LoRA
 
-Fine-tunes `meta-llama/Llama-3.1-8B-Instruct` with LoRA (via LLaMA-Factory) and deploys the result as an Ollama model named `hiba-planner`.
+底模固定為 `meta-llama/Llama-3.1-8B-Instruct`。這一版只重訓 LoRA，目標是讓模型依 Accounting Server 提供的節點、ToolSpec 與 JSON Schema，輸出 Core Protocol v1 `ExecutionPlan`。
 
-## Prerequisites
+## 固定契約
 
-- Python 3.11+（3.13 需要 `run_train.py` 的依賴預載處理，已內建）
-- LLaMA-Factory：`pip install llamafactory`
-- Ollama 0.1.26+（需支援 `FROM /path/to/hf/dir`）
-- Dataset `hiba_workflow` 已註冊至 LLaMA-Factory dataset registry
+- 輸入：任務文字、`resources`、`NodeDescriptor[]`、`ToolSpec[]`
+- 輸出：`protocolVersion`、`steps[]`、`supervisorPolicy`
+- 每個 step：`stepId`、`toolName`、`nodeId`、`version`、`input`、`dependsOn`
+- 禁止使用舊欄位：`tool`、`script`、`args`
 
-## Quickstart
+## 執行順序
 
-```bash
-# Step 1 — Fine-tune（從 hiba-core/ 目錄執行）
+```powershell
+npm run dataset:v1
+npm run dataset:validate
 python training/run_train.py
-
-# Step 2 — Merge LoRA + 部署至 Ollama
 python training/export_and_deploy.py
+python benchmark_quality.py hiba-planner:v1
 ```
 
----
-
-## 完整流程
-
-```
-run_train.py
-  └─ llamafactory-cli train train_config.yaml
-       └─ 輸出: training/hiba-planner-lora/   ← LoRA adapter weights
-
-export_and_deploy.py
-  ├─ 1. LLaMA-Factory export  →  training/hiba-planner-merged/  (safetensors)
-  ├─ 2. 寫入 Modelfile         →  hiba-core/Modelfile
-  ├─ 3. ollama create hiba-planner
-  └─ 4. 推論 smoke-test
-```
-
----
-
-## 腳本說明
-
-| 檔案 | 用途 |
-|---|---|
-| `run_train.py` | **訓練入口**。以正確順序預載 C extension（避免 Python 3.13 segfault），再執行 LLaMA-Factory SFT 訓練。 |
-| `train_config.yaml` | 訓練超參數：base model、LoRA rank/alpha、dataset、epoch、輸出路徑。 |
-| `export_and_deploy.py` | **部署入口**。合併 LoRA → safetensors、寫入 Modelfile、呼叫 `ollama create`、執行 smoke-test。 |
-| `export_config.yaml` | 由 `export_and_deploy.py` 自動產生，勿手動編輯。 |
-| `watch_training.py` | 選用：每 5 分鐘輪詢 `trainer_state.json`，訓練完成後自動觸發 `export_and_deploy.py`。 |
-| `convert_wrapper.py` | 選用 GGUF 路徑：修補 `gguf` 0.18.0 缺少的 arch enum，再執行 `_convert_hf_to_gguf.py`。僅需 `.gguf` 檔案時使用（Ollama 已支援直接匯入 safetensors，一般不需要此步驟）。 |
-| `_convert_hf_to_gguf.py` | llama.cpp 的 HF → GGUF 轉換腳本。只透過 `convert_wrapper.py` 呼叫。 |
-
----
-
-## 選用：Watcher（無人值守）
-
-訓練開始前或進行中，在第二個終端機啟動 watcher：
-
-```bash
-# Terminal 1
-python training/run_train.py
-
-# Terminal 2
-python training/watch_training.py
-```
-
-Watcher 偵測到 `global_step ≥ 36` 或 `adapter_model.safetensors` 存在時，自動接續執行 `export_and_deploy.py`。
-
----
-
-## 輸出目錄
-
-| 路徑 | 內容 | Git |
-|---|---|---|
-| `training/hiba-planner-lora/` | LoRA adapter weights | excluded（`.gitignore`）|
-| `training/hiba-planner-merged/` | 合併後 HF safetensors | excluded（`.gitignore`）|
-| `hiba-core/Modelfile` | Ollama model definition | tracked |
-
----
-
-## 僅重新部署（訓練已完成）
-
-若 LoRA 訓練已完成，只需重新建立 Ollama 模型：
-
-```bash
-python training/export_and_deploy.py
-```
-
-`hiba-planner-merged/*.safetensors` 已存在時，腳本會跳過 LoRA merge 步驟直接部署。
-
----
-
-## 推論環境變數
-
-```bash
-LLM_URL=http://localhost:11434/v1/chat/completions
-LLM_MODEL=hiba-planner
-LLM_FORMAT=ollama
-```
+訓練輸出使用 `training/hiba-planner-v1-lora/`，合併模型使用 `training/hiba-planner-v1-merged/`，因此不會覆蓋舊版。只有 `exact`、`tool`、`node`、`input`、`dependency` 指標符合部署門檻後，才應把 `hiba-planner:v1` 切換成正式模型。量化應在 F16 通過後另做比較，不放進訓練主流程。

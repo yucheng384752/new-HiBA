@@ -3,144 +3,104 @@
 import fs from 'node:fs';
 import readline from 'node:readline';
 
-async function loadZod() {
-  try {
-    return await import('zod');
-  } catch {
-    try {
-      return await import('https://esm.sh/zod');
-    } catch {
-      return null;
+const PROTOCOL_VERSION = '1.0';
+
+function fail(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+function validateValue(value, schema, field) {
+  if (!schema || typeof schema !== 'object') return;
+  if (schema.enum) fail(schema.enum.includes(value), `${field} is not in enum`);
+  if (schema.type === 'string') fail(typeof value === 'string', `${field} must be string`);
+  if (schema.type === 'number') fail(typeof value === 'number' && Number.isFinite(value), `${field} must be number`);
+  if (schema.type === 'integer') fail(Number.isInteger(value), `${field} must be integer`);
+  if (schema.type === 'boolean') fail(typeof value === 'boolean', `${field} must be boolean`);
+  if (schema.type === 'array') {
+    fail(Array.isArray(value), `${field} must be array`);
+    value.forEach((item, index) => validateValue(item, schema.items, `${field}[${index}]`));
+  }
+  if (schema.type === 'object') {
+    fail(value && typeof value === 'object' && !Array.isArray(value), `${field} must be object`);
+    const properties = schema.properties ?? {};
+    for (const key of schema.required ?? []) fail(key in value, `${field}.${key} is required`);
+    if (schema.additionalProperties === false) {
+      for (const key of Object.keys(value)) fail(key in properties, `${field}.${key} is not allowed`);
+    }
+    for (const [key, item] of Object.entries(value)) {
+      if (properties[key]) validateValue(item, properties[key], `${field}.${key}`);
     }
   }
 }
 
-function createLineValidator(zodModule) {
-  const z = zodModule?.z || zodModule?.default || zodModule;
-  if (z?.object && z?.array && z?.record && z?.unknown && z?.enum && z?.string) {
-    const stepSchema = z.object({
-      nodeId: z.string(),
-      tool: z.string(),
-      script: z.string(),
-      args: z.record(z.string(), z.unknown()),
-    });
-    const planSchema = z.object({
-      steps: z.array(stepSchema),
-      supervisorPolicy: z.enum(['fail-fast', 'partial-success']),
-    });
-    const rowSchema = z.object({
-      instruction: z.string(),
-      input: z.string(),
-      output: z.string(),
-    });
-
-    return (line) => {
-      let row;
-      try {
-        row = JSON.parse(line);
-      } catch {
-        return { valid: false, message: 'invalid JSON' };
-      }
-
-      const rowResult = rowSchema.safeParse(row);
-      if (!rowResult.success) return { valid: false, message: formatZodIssue(rowResult.error) };
-
-      let output;
-      try {
-        output = JSON.parse(row.output);
-      } catch {
-        return { valid: false, message: 'output invalid JSON' };
-      }
-
-      const planResult = planSchema.safeParse(output);
-      if (!planResult.success) return { valid: false, message: formatZodIssue(planResult.error) };
-      return { valid: true };
-    };
+function hasCycle(steps) {
+  const pending = new Map(steps.map(item => [item.stepId, new Set(item.dependsOn)]));
+  while (pending.size) {
+    const ready = [...pending].filter(([, deps]) => deps.size === 0).map(([id]) => id);
+    if (!ready.length) return true;
+    for (const id of ready) pending.delete(id);
+    for (const deps of pending.values()) ready.forEach(id => deps.delete(id));
   }
-
-  return (line) => {
-    let row;
-    try {
-      row = JSON.parse(line);
-    } catch {
-      return { valid: false, message: 'invalid JSON' };
-    }
-
-    for (const key of ['instruction', 'input', 'output']) {
-      if (typeof row?.[key] !== 'string') return { valid: false, message: `missing ${key}` };
-    }
-
-    let output;
-    try {
-      output = JSON.parse(row.output);
-    } catch {
-      return { valid: false, message: 'output invalid JSON' };
-    }
-
-    if (!output || typeof output !== 'object' || Array.isArray(output)) {
-      return { valid: false, message: 'output must be an object' };
-    }
-    if (!Array.isArray(output.steps)) return { valid: false, message: 'missing steps' };
-    for (let i = 0; i < output.steps.length; i += 1) {
-      const step = output.steps[i];
-      if (!step || typeof step !== 'object' || Array.isArray(step)) return { valid: false, message: `steps[${i}] must be an object` };
-      for (const key of ['nodeId', 'tool', 'script']) {
-        if (typeof step[key] !== 'string') return { valid: false, message: `steps[${i}] missing ${key}` };
-      }
-      if (!step.args || typeof step.args !== 'object' || Array.isArray(step.args)) return { valid: false, message: `steps[${i}] missing args` };
-    }
-    if (!['fail-fast', 'partial-success'].includes(output.supervisorPolicy)) {
-      return { valid: false, message: 'missing supervisorPolicy' };
-    }
-    return { valid: true };
-  };
+  return false;
 }
 
-function formatZodIssue(error) {
-  const issue = error?.issues?.[0];
-  if (!issue) return 'validation failed';
-  const path = Array.isArray(issue.path) ? issue.path.join('.') : '';
-  if (path) {
-    const normalized = path.replace(/steps\.(\d+)\./g, 'steps[$1] ');
-    const last = String(issue.path[issue.path.length - 1] ?? '');
-    if (issue.code === 'invalid_type' && issue.received === 'undefined') return `${normalized}`;
-    if (last) return `${normalized} ${issue.message}`.trim();
+export function validateRow(row) {
+  fail(row && typeof row === 'object', 'row must be object');
+  for (const key of ['instruction', 'input', 'output']) fail(typeof row[key] === 'string', `${key} must be string`);
+
+  let context;
+  let plan;
+  try { context = JSON.parse(row.input); } catch { throw new Error('input must contain JSON'); }
+  try { plan = JSON.parse(row.output); } catch { throw new Error('output must contain JSON'); }
+
+  fail(context.protocolVersion === PROTOCOL_VERSION, 'input protocolVersion must be 1.0');
+  fail(Array.isArray(context.tools), 'input.tools must be array');
+  fail(Array.isArray(context.nodes), 'input.nodes must be array');
+  fail(plan.protocolVersion === PROTOCOL_VERSION, 'output protocolVersion must be 1.0');
+  fail(Array.isArray(plan.steps) && plan.steps.length > 0, 'output.steps must be non-empty array');
+  fail(['fail-fast', 'partial-success'].includes(plan.supervisorPolicy), 'invalid supervisorPolicy');
+
+  const tools = new Map(context.tools.map(item => [`${item.name}@${item.version}`, item]));
+  const nodes = new Map(context.nodes.map(item => [item.nodeId, item]));
+  const stepIds = new Set();
+  for (const item of plan.steps) {
+    for (const key of ['stepId', 'toolName', 'nodeId', 'version']) fail(typeof item[key] === 'string' && item[key], `step.${key} is required`);
+    fail(item.input && typeof item.input === 'object' && !Array.isArray(item.input), `${item.stepId}.input must be object`);
+    fail(Array.isArray(item.dependsOn), `${item.stepId}.dependsOn must be array`);
+    fail(!stepIds.has(item.stepId), `duplicate stepId ${item.stepId}`);
+    stepIds.add(item.stepId);
+
+    const spec = tools.get(`${item.toolName}@${item.version}`);
+    fail(spec, `${item.stepId} references unknown tool/version`);
+    validateValue(item.input, spec.inputSchema, `${item.stepId}.input`);
+
+    const node = nodes.get(item.nodeId);
+    fail(node?.status === 'online', `${item.stepId} node must be online`);
+    const advertised = node.resources?.some(resource => resource.name === item.toolName && resource.version === item.version);
+    fail(node.canInstall === true || advertised, `${item.stepId} node cannot execute tool`);
   }
-  return issue.message || 'validation failed';
+  for (const item of plan.steps) {
+    for (const dependency of item.dependsOn) fail(stepIds.has(dependency), `${item.stepId} has unknown dependency ${dependency}`);
+  }
+  fail(!hasCycle(plan.steps), 'dependency cycle detected');
+  return true;
 }
 
-async function main() {
-  const filePath = process.argv[2];
-  if (!filePath) throw new Error('Usage: node tools/validate-dataset.mjs dataset.jsonl');
-
-  const validateLine = createLineValidator(await loadZod());
+async function validateFile(filePath) {
   const input = fs.createReadStream(filePath, { encoding: 'utf8' });
-  const rl = readline.createInterface({ input, crlfDelay: Infinity });
-
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
   let total = 0;
-  let valid = 0;
   const invalid = [];
-
-  for await (const line of rl) {
-    if (line.trim() === '') continue;
+  for await (const line of lines) {
+    if (!line.trim()) continue;
     total += 1;
-    const result = validateLine(line);
-    if (result.valid) {
-      valid += 1;
-    } else {
-      invalid.push({ line: total, message: result.message });
-    }
+    try { validateRow(JSON.parse(line)); } catch (error) { invalid.push(`Line ${total}: ${error.message}`); }
   }
-
-  console.log(`Total: ${total} | Valid: ${valid} | Invalid: ${invalid.length}`);
-  for (const issue of invalid) {
-    console.log(`Line ${issue.line}: ${issue.message}`);
-  }
-
-  if (invalid.length > 0) process.exitCode = 1;
+  console.log(`${filePath}: total=${total} valid=${total - invalid.length} invalid=${invalid.length}`);
+  invalid.slice(0, 20).forEach(issue => console.log(issue));
+  if (!total || invalid.length) process.exitCode = 1;
 }
 
-main().catch((error) => {
-  console.error(error.message);
-  process.exitCode = 1;
-});
+const files = process.argv.slice(2);
+if (!files.length) throw new Error('Usage: node tools/validate-dataset.mjs <dataset.jsonl> [...]');
+for (const file of files) await validateFile(file);

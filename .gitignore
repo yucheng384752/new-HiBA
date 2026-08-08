@@ -30,6 +30,8 @@ Thumbs.db
 *.gguf
 hiba-core/training/hiba-planner-lora/
 hiba-core/training/hiba-planner-merged/
+hiba-core/training/hiba-planner-v1-lora/
+hiba-core/training/hiba-planner-v1-merged/
 
 # Claude Code worktrees
 .claude/worktrees/
