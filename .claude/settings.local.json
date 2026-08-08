@@ -30,7 +30,19 @@
       "Bash(python3 *)",
       "Bash(node -e ' *)",
       "Bash(xargs grep *)",
-      "Bash(node *)"
+      "Bash(node *)",
+      "Bash(npm.cmd test *)",
+      "Bash(npm.cmd run *)",
+      "Bash(npm run *)",
+      "Bash(npm test *)",
+      "Bash(python -m py_compile hiba-core/benchmark_quality.py hiba-core/post_train_pipeline.py hiba-core/training/export_and_deploy.py hiba-core/training/run_train.py)",
+      "Bash(git diff *)",
+      "Bash(echo \"-- exit: $? --\")",
+      "Bash(git checkout *)",
+      "Bash(git commit -m 'feat\\(agent\\): add WorkflowStore, plan validation, and audit anchoring *)",
+      "Bash(git commit -m 'chore\\(tools\\): add dev runtime launcher and tool manifest sync *)",
+      "Bash(git commit -m 'feat\\(training\\): rewrite v1 dataset generation pipeline *)",
+      "Bash(git commit -m 'docs: add project coordination docs *)"
     ]
   }
 }
