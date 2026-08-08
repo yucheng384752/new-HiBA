@@ -42,7 +42,9 @@
       "Bash(git commit -m 'feat\\(agent\\): add WorkflowStore, plan validation, and audit anchoring *)",
       "Bash(git commit -m 'chore\\(tools\\): add dev runtime launcher and tool manifest sync *)",
       "Bash(git commit -m 'feat\\(training\\): rewrite v1 dataset generation pipeline *)",
-      "Bash(git commit -m 'docs: add project coordination docs *)"
+      "Bash(git commit -m 'docs: add project coordination docs *)",
+      "Bash(git commit -m 'chore\\(claude\\): expand allowed bash permissions *)",
+      "Bash(git commit *)"
     ]
   }
 }
