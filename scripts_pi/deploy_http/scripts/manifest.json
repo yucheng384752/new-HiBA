@@ -1,165 +1,582 @@
 [
   {
-    "name": "script_1",
-    "toolName": "machine.executeOrder",
+    "scriptName": "script_1",
+    "renderHint": "table",
+    "protocolVersion": "1.0",
+    "name": "machine.executeOrder",
     "version": "1.0.0",
-    "tags": ["machine", "write"],
-    "permissions": ["machine.write"],
-    "description": "工單執行腳本（讀取 data_orders.json）",
+    "description": "在 Pi 節點執行工單（讀取 data_orders.json）",
+    "tags": [
+      "machine",
+      "write"
+    ],
     "inputSchema": {
-      "orderId":  { "type": "string", "required": true,  "description": "工單 ID，如 WO-2026-001" },
-      "quantity": { "type": "number", "required": false, "description": "執行數量（留空則沿用工單預設）" }
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "description": "工單 ID，如 WO-2026-001"
+        },
+        "quantity": {
+          "type": "number",
+          "description": "執行數量（省略時沿用工單預設）"
+        }
+      },
+      "required": [
+        "orderId"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "outputSchema": {
-      "success":     { "type": "boolean" },
-      "orderId":     { "type": "string" },
-      "product":     { "type": "string" },
-      "processed":   { "type": "number" },
-      "completedAt": { "type": "string" },
-      "toolName":    { "type": "string", "description": "正式 Tool 名稱，供 AuditTrail 使用" },
-      "domain":      { "type": "string", "description": "域分類，供 AuditTrail 使用" }
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "orderId": {
+          "type": "string"
+        },
+        "product": {
+          "type": "string"
+        },
+        "material": {
+          "type": "string"
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "processed": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "priority": {
+          "type": "string"
+        },
+        "completedAt": {
+          "type": "string",
+          "description": "完成時間 ISO 8601"
+        }
+      },
+      "required": [
+        "success",
+        "orderId",
+        "product",
+        "material",
+        "quantity",
+        "processed",
+        "unit",
+        "priority",
+        "completedAt"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
-    "renderHint": "table",
-    "timeout": 10000
+    "permissions": [
+      "machine.write"
+    ],
+    "timeoutMs": 10000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    }
   },
   {
-    "name": "script_2",
-    "toolName": "machine.queryStatus",
-    "version": "1.0.0",
-    "tags": ["machine", "read"],
-    "permissions": ["machine.read"],
-    "description": "機台狀態查詢（讀取 data_machines.json）",
-    "inputSchema": {
-      "machineId": { "type": "string", "required": true, "description": "機台 ID，如 CNC-01 / LATHE-01 / PRESS-01 / WELD-01" }
-    },
-    "outputSchema": {
-      "status":   { "type": "string", "enum": ["running", "idle", "error"] },
-      "oee":      { "type": "number", "description": "OEE 值 0~100" },
-      "alarms":   { "type": "array" },
-      "toolName": { "type": "string", "description": "正式 Tool 名稱，供 AuditTrail 使用" },
-      "domain":   { "type": "string", "description": "域分類，供 AuditTrail 使用" }
-    },
+    "scriptName": "script_2",
     "renderHint": "status",
-    "timeout": 10000
-  },
-  {
-    "name": "script_3",
-    "toolName": "env.readSensor",
+    "protocolVersion": "1.0",
+    "name": "machine.queryStatus",
     "version": "1.0.0",
-    "tags": ["env", "read"],
-    "permissions": ["env.read"],
-    "description": "環境感測器讀取（讀取 data_sensors.json）",
+    "description": "查詢機台當前運作狀態",
+    "tags": [
+      "machine",
+      "read"
+    ],
     "inputSchema": {
-      "sensorId": { "type": "string", "required": false, "description": "感測器 ID，如 sensor-01 ~ sensor-06；不填則讀全部" }
+      "type": "object",
+      "properties": {
+        "machineId": {
+          "type": "string",
+          "description": "機台 ID"
+        }
+      },
+      "required": [
+        "machineId"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "outputSchema": {
-      "temperature": { "type": "number", "description": "攝氏溫度" },
-      "humidity":    { "type": "number", "description": "相對濕度 %" },
-      "sensors":     { "type": "array",  "description": "所有感測器讀值陣列" },
-      "timestamp":   { "type": "string" },
-      "toolName":    { "type": "string", "description": "正式 Tool 名稱，供 AuditTrail 使用" },
-      "domain":      { "type": "string", "description": "域分類，供 AuditTrail 使用" }
+      "type": "object",
+      "properties": {
+        "machineId": {
+          "type": "string"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "running",
+            "idle",
+            "alarm",
+            "maintenance"
+          ],
+          "description": "運作狀態"
+        },
+        "lastUpdated": {
+          "type": "string",
+          "description": "最後更新時間 ISO 8601"
+        }
+      },
+      "required": [
+        "machineId",
+        "status",
+        "lastUpdated"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
+    "permissions": [
+      "machine.read"
+    ],
+    "timeoutMs": 8000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    }
+  },
+  {
+    "scriptName": "script_3",
     "renderHint": "chart",
-    "timeout": 5000
+    "protocolVersion": "1.0",
+    "name": "env.readSensor",
+    "version": "1.0.0",
+    "description": "讀取 Pi 節點所有環境感測器（溫濕度等），可指定單一感測器 ID",
+    "tags": [
+      "env",
+      "read"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sensorId": {
+          "type": "string",
+          "description": "感測器 ID（省略時讀取全部）"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "temperature": {
+          "type": "number",
+          "description": "代表性溫度（°C）"
+        },
+        "humidity": {
+          "type": "number",
+          "description": "代表性相對濕度（%RH）"
+        },
+        "sensors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "sensorId": {
+                "type": "string"
+              },
+              "temperature": {
+                "type": "number"
+              },
+              "humidity": {
+                "type": "number"
+              },
+              "timestamp": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "sensorId",
+              "temperature",
+              "humidity",
+              "timestamp"
+            ],
+            "additionalProperties": false
+          },
+          "description": "所有感測器讀值陣列"
+        },
+        "timestamp": {
+          "type": "string",
+          "description": "量測時間 ISO 8601"
+        }
+      },
+      "required": [
+        "sensors",
+        "timestamp"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "permissions": [
+      "env.read"
+    ],
+    "timeoutMs": 5000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    }
   },
   {
-    "name": "script_echo",
-    "toolName": "orchestrator.echoRtt",
+    "scriptName": "script_echo",
+    "renderHint": "table",
+    "protocolVersion": "1.0",
+    "name": "orchestrator.echoRtt",
     "version": "1.0.0",
-    "tags": ["orchestrator", "read"],
-    "permissions": ["orchestrator.read"],
     "description": "Echo 回響 / RTT 測試：驗證 PC→Pi→PC 通道並量測延遲",
+    "tags": [
+      "orchestrator",
+      "read"
+    ],
     "inputSchema": {
-      "message": { "type": "string", "required": false, "description": "任意字串，Pi 原樣回傳" },
-      "sentAt":  { "type": "string", "required": false, "description": "PC 送出時間戳（ISO 8601），用於計算 RTT" }
+      "type": "object",
+      "properties": {
+        "message": {
+          "type": "string",
+          "description": "任意字串，Pi 原樣回傳"
+        },
+        "sentAt": {
+          "type": "string",
+          "description": "PC 送出時間戳（ISO 8601），用於計算 RTT"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "outputSchema": {
-      "echo":       { "type": "string" },
-      "receivedAt": { "type": "string" },
-      "rttMs":      { "type": "number", "description": "Pi 端量測的來回延遲 ms" },
-      "nodeId":     { "type": "string" },
-      "toolName":   { "type": "string", "description": "正式 Tool 名稱，供 AuditTrail 使用" },
-      "domain":     { "type": "string", "description": "域分類，供 AuditTrail 使用" }
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "echo": {
+          "type": "string"
+        },
+        "sentAt": {
+          "type": "string"
+        },
+        "receivedAt": {
+          "type": "string"
+        },
+        "rttMs": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "description": "Pi 端量測的來回延遲 ms"
+        },
+        "nodeId": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success",
+        "echo",
+        "receivedAt",
+        "rttMs",
+        "nodeId"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
-    "renderHint": "table",
-    "timeout": 5000
+    "permissions": [
+      "orchestrator.read"
+    ],
+    "timeoutMs": 10000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    }
   },
   {
-    "name": "script_read_attach",
-    "toolName": "material.readAttachment",
+    "scriptName": "script_read_attach",
+    "renderHint": "table",
+    "protocolVersion": "1.0",
+    "name": "material.readAttachment",
     "version": "1.0.0",
-    "tags": ["material", "read"],
-    "permissions": ["material.read"],
-    "description": "讀取附加文件並回傳摘要（示範 _filePath 用法）",
+    "description": "讀取前端上傳的附加文件並回傳摘要（_filePath 由後端自動注入）",
+    "tags": [
+      "material",
+      "read"
+    ],
     "inputSchema": {
-      "maxRows": { "type": "number", "required": false, "description": "預覽行數 / 筆數（預設 20）" }
+      "type": "object",
+      "properties": {
+        "_filePath": {
+          "type": "string",
+          "description": "由後端注入的臨時檔案路徑"
+        },
+        "_fileName": {
+          "type": "string",
+          "description": "原始檔名（後端注入）"
+        },
+        "maxRows": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200,
+          "default": 20,
+          "description": "最多回傳幾行"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "outputSchema": {
-      "fileName":  { "type": "string" },
-      "sizeBytes": { "type": "number" },
-      "lineCount": { "type": "number" },
-      "dataType":  { "type": "string", "enum": ["json", "text"] },
-      "summary":   { "type": "string" },
-      "preview":   { "type": "string" },
-      "toolName":  { "type": "string", "description": "正式 Tool 名稱，供 AuditTrail 使用" },
-      "domain":    { "type": "string", "description": "域分類，供 AuditTrail 使用" }
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "fileName": {
+          "type": "string"
+        },
+        "sizeBytes": {
+          "type": "number"
+        },
+        "lineCount": {
+          "type": "number"
+        },
+        "preview": {
+          "type": "string",
+          "description": "前 N 行或 JSON 摘要"
+        },
+        "dataType": {
+          "type": "string",
+          "enum": [
+            "json",
+            "text"
+          ]
+        }
+      },
+      "required": [
+        "success",
+        "fileName",
+        "sizeBytes",
+        "lineCount",
+        "preview",
+        "dataType"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
-    "renderHint": "table",
-    "timeout": 5000
+    "permissions": [
+      "material.read"
+    ],
+    "timeoutMs": 10000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    }
   },
   {
-    "name": "script_fileio",
-    "toolName": "env.verifyFileIo",
+    "scriptName": "script_fileio",
+    "renderHint": "table",
+    "protocolVersion": "1.0",
+    "name": "env.verifyFileIo",
     "version": "1.0.0",
-    "tags": ["env", "write"],
-    "permissions": ["env.write"],
-    "description": "檔案寫入回讀測試（2-phase）：probe 驗證傳輸通道，write 寫入並回讀驗證",
+    "description": "Pi 本地檔案系統讀寫驗證（2-phase：probe 確認通道，write 寫入並回讀）",
+    "tags": [
+      "env",
+      "write"
+    ],
     "inputSchema": {
-      "mode":     { "type": "string", "required": false, "enum": ["probe", "write", "full"], "description": "執行模式：probe=空檔傳輸測試, write=寫入驗證, full=完整流程（預設）" },
-      "content":  { "type": "string", "required": false, "description": "要寫入的字串內容（write/full 模式用）" },
-      "filename": { "type": "string", "required": false, "description": "檔名（預設 test_io.txt）" }
+      "type": "object",
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "probe",
+            "write",
+            "full"
+          ],
+          "default": "full",
+          "description": "執行模式"
+        },
+        "content": {
+          "type": "string",
+          "description": "要寫入的字串（write/full 用，省略時使用時間戳）"
+        },
+        "filename": {
+          "type": "string",
+          "description": "檔名（省略時使用 test_io.txt）"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "outputSchema": {
-      "success":    { "type": "boolean", "description": "整體是否成功" },
-      "phase":      { "type": "string",  "enum": ["probe", "write", "full"], "description": "實際執行的階段" },
-      "transferOk": { "type": "boolean", "description": "空檔傳輸是否成功（probe/full 模式才有）" },
-      "written":    { "type": "boolean", "description": "內容是否寫入（write/full 模式才有）" },
-      "matched":    { "type": "boolean", "description": "回讀內容是否與寫入一致" },
-      "failReason": { "type": "string",  "description": "失敗原因（失敗時才有）" },
-      "path":       { "type": "string" },
-      "sizeBytes":  { "type": "number" },
-      "readBack":   { "type": "string" },
-      "writtenAt":  { "type": "string" },
-      "toolName":   { "type": "string", "description": "正式 Tool 名稱，供 AuditTrail 使用" },
-      "domain":     { "type": "string", "description": "域分類，供 AuditTrail 使用" }
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "phase": {
+          "type": "string",
+          "enum": [
+            "probe",
+            "write",
+            "full"
+          ]
+        },
+        "transferOk": {
+          "type": "boolean",
+          "description": "probe / full 模式：空檔傳輸是否成功"
+        },
+        "written": {
+          "type": "boolean",
+          "description": "write / full 模式：是否已寫入"
+        },
+        "content": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string",
+          "description": "寫入的絕對路徑"
+        },
+        "sizeBytes": {
+          "type": "number"
+        },
+        "writtenAt": {
+          "type": "string",
+          "description": "寫入時間 ISO 8601"
+        },
+        "readBack": {
+          "type": "string",
+          "description": "回讀內容"
+        },
+        "matched": {
+          "type": "boolean",
+          "description": "寫入內容與回讀是否一致"
+        }
+      },
+      "required": [
+        "success",
+        "phase",
+        "path"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
-    "renderHint": "table",
-    "timeout": 5000
+    "permissions": [
+      "env.write"
+    ],
+    "timeoutMs": 15000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    }
   },
   {
-    "name": "system.deployServer",
-    "toolName": "orchestrator.deployServer",
+    "scriptName": "system.deployServer",
+    "renderHint": "table",
+    "protocolVersion": "1.0",
+    "name": "orchestrator.deployServer",
     "version": "1.0.0",
-    "tags": ["orchestrator", "write"],
-    "permissions": ["orchestrator.write"],
-    "description": "自部署 Sub-Web 伺服器（新系統首次安裝 / 舊系統加裝皆適用）",
+    "description": "在新節點安裝或更新 Pi Sub-Web 伺服器",
+    "tags": [
+      "orchestrator",
+      "write"
+    ],
     "inputSchema": {
-      "hibaRoot": { "type": "string", "required": false, "description": "安裝根目錄（預設 /opt/hiba）" },
-      "nodeId":   { "type": "string", "required": false, "description": "節點 ID，寫入 .env（預設 m1）" },
-      "clawUrl":  { "type": "string", "required": false, "description": "Claw 主控端 URL，寫入 .env（預設 http://192.168.1.100:8080）" }
+      "type": "object",
+      "properties": {
+        "hibaRoot": {
+          "type": "string",
+          "description": "安裝根目錄，預設 /opt/hiba"
+        },
+        "nodeId": {
+          "type": "string",
+          "description": "節點 ID，預設 m1"
+        },
+        "clawUrl": {
+          "type": "string",
+          "description": "Claw 主控端 URL"
+        }
+      },
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "outputSchema": {
-      "success":    { "type": "boolean" },
-      "steps":      { "type": "array",  "description": "各步驟執行記錄" },
-      "warnings":   { "type": "array",  "description": "非致命警告（如無 root 權限）" },
-      "serverPath": { "type": "string", "description": "sub_web_server.js 安裝路徑" },
-      "scriptsDir": { "type": "string" },
-      "dataDir":    { "type": "string" },
-      "toolName":   { "type": "string", "description": "正式 Tool 名稱，供 AuditTrail 使用" },
-      "domain":     { "type": "string", "description": "域分類，供 AuditTrail 使用" }
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "steps": {
+          "type": "array",
+          "items": {}
+        },
+        "warnings": {
+          "type": "array",
+          "items": {}
+        },
+        "serverPath": {
+          "type": "string"
+        },
+        "scriptsDir": {
+          "type": "string"
+        },
+        "dataDir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "success",
+        "steps",
+        "warnings",
+        "serverPath",
+        "scriptsDir",
+        "dataDir"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
-    "renderHint": "table",
-    "timeout": 180000
+    "permissions": [
+      "orchestrator.write"
+    ],
+    "timeoutMs": 180000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    }
   }
 ]
