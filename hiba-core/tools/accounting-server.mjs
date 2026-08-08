@@ -348,7 +348,7 @@ const server = http.createServer(async (req, res) => {
       if (!resources) {
         const scripts = await fetchJson(`${body.agentUrl}/scripts`).catch(() => null);
         if (scripts?.res.ok && Array.isArray(scripts.body?.scripts)) {
-          resources = scripts.body.scripts.map(tool => ({ name: tool.toolName, version: tool.version ?? '1.0.0', type: 'tool' }));
+          resources = scripts.body.scripts.map(tool => ({ name: tool.name, version: tool.version ?? '1.0.0', type: 'tool' }));
           canInstall = true;
         }
       }

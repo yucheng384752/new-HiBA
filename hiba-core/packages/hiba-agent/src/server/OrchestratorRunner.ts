@@ -185,8 +185,7 @@ export class OrchestratorRunner {
     const addresses = new Map(this.nodeAddresses);
     if (!this.accountingUrl) return { addresses, nodes: [] };
 
-    // Only fetch if there are nodeIds not already covered by static map
-    const unknown = [...new Set(steps.map(s => s.nodeId))].filter(id => !addresses.has(id));
+    // Always fetch: ensureNodeTool() needs canInstall/tool availability for discovered nodes
     let nodes: NodeDescriptor[] = [];
 
     try {
@@ -260,9 +259,9 @@ export class OrchestratorRunner {
       if (!res.ok) return null;
       const verify = await fetch(`${installable.agentUrl}/scripts`, { signal: AbortSignal.timeout(5_000) });
       if (!verify.ok) return null;
-      const manifest = await verify.json() as { scripts?: Array<{ toolName: string; version?: string }> };
+      const manifest = await verify.json() as { scripts?: Array<{ name: string; version?: string }> };
       const installed = manifest.scripts?.some(
-        tool => tool.toolName === step.toolName && (tool.version ?? '1.0.0') === step.version,
+        tool => tool.name === step.toolName && (tool.version ?? '1.0.0') === step.version,
       );
       if (!installed) return null;
       this.piManifestCache.delete(installable.agentUrl);
@@ -349,8 +348,8 @@ export class OrchestratorRunner {
           { durationMs: Date.now() - startedAt, executedAt, details: { httpStatus: mRes.status } },
         );
       }
-      const manifest = await mRes.json() as { scripts: Array<{ name: string; toolName: string }> };
-      toolMap = new Map(manifest.scripts.map(s => [s.toolName, s.name]));
+      const manifest = await mRes.json() as { scripts: Array<{ name: string; scriptName: string }> };
+      toolMap = new Map(manifest.scripts.map(s => [s.name, s.scriptName]));
       this.piManifestCache.set(agentUrl, toolMap);
     }
 
