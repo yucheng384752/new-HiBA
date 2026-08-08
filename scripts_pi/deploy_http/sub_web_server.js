@@ -6,7 +6,7 @@
  * 三項關鍵 Tool 要素：
  *   ① Schema 驗證 (inputSchema) → SCHEMA_VALIDATION_ERROR
  *   ② AuditTrail SQLite (anchorResult) → audit_trail.db
- *   ③ Timeout 來自 manifest → execFile 使用 manifest.timeout
+ *   ③ Timeout 來自 ToolSpec → execFile 使用 timeoutMs
  *
  * 安裝依賴：
  *   npm install express better-sqlite3
@@ -45,6 +45,8 @@ app.use((req, res, next) => {
 const NODE_ID    = process.env.NODE_ID    ?? 'unknown';
 const SCRIPTS_DIR = path.resolve(process.env.SCRIPTS_DIR ?? path.join(__dirname, 'scripts'));
 const PORT       = parseInt(process.env.PORT ?? '3000');
+const ACCOUNTING_URL = (process.env.ACCOUNTING_URL ?? '').replace(/\/$/, '');
+const AGENT_URL = (process.env.AGENT_URL ?? '').replace(/\/$/, '');
 
 // ── 啟動時確保必要目錄存在 ────────────────────────────────────────
 // 同時處理：新系統（00_setup.sh 剛跑完）與舊系統加裝（目錄可能缺）
@@ -66,9 +68,9 @@ try {
   console.error(`[Manifest] 無法載入 ${manifestPath}:`, e.message);
 }
 /** @type {Map<string, object>} scriptName → manifest entry */
-const scriptMap = new Map(manifest.map(s => [s.name, s]));
+const scriptMap = new Map(manifest.map(s => [s.scriptName, s]));
 /** @type {Map<string, string>} toolName → scriptName */
-const toolNameToScript = new Map(manifest.map(s => [s.toolName, s.name]));
+const toolNameToScript = new Map(manifest.map(s => [s.name, s.scriptName]));
 
 // ── ① AuditTrail SQLite ──────────────────────────────────────────
 let db = null;
@@ -127,32 +129,32 @@ function anchorResult(entry) {
 }
 
 // ── ① Schema 驗證 ─────────────────────────────────────────────────
-/**
- * 依 manifest inputSchema 驗證 params
- * @returns {string[]} errors 陣列（空陣列 = 驗證通過）
- */
-function validateInput(params, inputSchema) {
-  if (!inputSchema) return [];
+function validateInput(params, schema) {
+  if (!schema) return [];
+  if (schema.type === 'object' && (params === null || typeof params !== 'object' || Array.isArray(params))) {
+    return ['input: 型別應為 object'];
+  }
+
   const errors = [];
-  for (const [key, def] of Object.entries(inputSchema)) {
-    const val = params[key];
-    // required 檢查
-    if (def.required && (val === undefined || val === null || val === '')) {
+  const required = new Set(schema.required ?? []);
+  for (const [key, def] of Object.entries(schema.properties ?? {})) {
+    const value = params[key];
+    if (required.has(key) && (value === undefined || value === null || value === '')) {
       errors.push(`${key}: 必填欄位缺少`);
       continue;
     }
-    // 略過未提供的選填欄位
-    if (val === undefined || val === null) continue;
-    // type 檢查
+    if (value === undefined || value === null) continue;
+
     if (def.type) {
-      const actual = Array.isArray(val) ? 'array' : typeof val;
-      if (actual !== def.type) {
+      const actual = Array.isArray(value) ? 'array' : typeof value;
+      const allowed = Array.isArray(def.type) ? def.type : [def.type];
+      const integer = actual === 'number' && allowed.includes('integer') && Number.isInteger(value);
+      if (!allowed.includes(actual) && !integer) {
         errors.push(`${key}: 型別應為 ${def.type}，實際為 ${actual}`);
       }
     }
-    // enum 檢查
-    if (def.enum && !def.enum.includes(val)) {
-      errors.push(`${key}: 值 "${val}" 不在允許清單 [${def.enum.join(', ')}]`);
+    if (def.enum && !def.enum.includes(value)) {
+      errors.push(`${key}: 值 "${value}" 不在允許清單 [${def.enum.join(', ')}]`);
     }
   }
   return errors;
@@ -186,7 +188,7 @@ app.get('/scripts', (_req, res) => {
  * @param {import('express').Response} res
  */
 function doExecute(meta, params, traceId, agentId, depth, res) {
-  const scriptName = meta.name;
+  const scriptName = meta.scriptName;
   console.log(`[${traceId}] Execute: ${scriptName}`, params);
 
   const scriptPath = path.join(SCRIPTS_DIR, `${scriptName}.py`);
@@ -194,7 +196,7 @@ function doExecute(meta, params, traceId, agentId, depth, res) {
     return res.status(404).json({ success: false, error: 'TOOL_NOT_FOUND', scriptName });
   }
 
-  const timeoutMs  = meta.timeout ?? 10000;
+  const timeoutMs  = meta.timeoutMs ?? 10000;
   const startMs    = Date.now();
   const executedAt = new Date().toISOString();
 
@@ -210,7 +212,7 @@ function doExecute(meta, params, traceId, agentId, depth, res) {
         const errCode   = isTimeout ? 'TOOL_TIMEOUT' : 'EXECUTION_ERROR';
         const auditHash = anchorResult({
           traceId, agentId, depth,
-          toolName:   meta.toolName   ?? scriptName,
+          toolName:   meta.name       ?? scriptName,
           toolDomain: meta.tags?.[0]  ?? 'unknown',
           scriptName, version: meta.version ?? '1.0.0',
           success: false, durationMs, executedAt,
@@ -234,7 +236,7 @@ function doExecute(meta, params, traceId, agentId, depth, res) {
       const ok = output.success !== false;
       const auditHash = anchorResult({
         traceId, agentId, depth,
-        toolName:   String(output.toolName  ?? meta.toolName   ?? scriptName),
+        toolName:   String(output.toolName  ?? meta.name       ?? scriptName),
         toolDomain: String(output.domain    ?? meta.tags?.[0]  ?? 'unknown'),
         scriptName, version: String(output.version ?? meta.version ?? '1.0.0'),
         success: ok, durationMs, executedAt,
@@ -266,7 +268,7 @@ app.post('/execute', (req, res) => {
   if (validationErrors.length > 0) {
     return res.status(400).json({
       success: false, error: 'SCHEMA_VALIDATION_ERROR',
-      scriptName, toolName: meta.toolName, violations: validationErrors,
+      scriptName, toolName: meta.name, violations: validationErrors,
     });
   }
   doExecute(meta, params, traceId, agentId, depth, res);
@@ -294,7 +296,7 @@ app.post('/api/execute', (req, res) => {
   if (validationErrors.length > 0) {
     return res.status(400).json({
       success: false, errorCode: 'SCHEMA_VALIDATION_ERROR',
-      toolName, scriptName: meta.name, violations: validationErrors,
+      toolName, scriptName: meta.scriptName, violations: validationErrors,
     });
   }
   doExecute(meta, input, traceId, agentId, depth, res);
@@ -360,14 +362,20 @@ app.post('/deploy', (req, res) => {
     if (type === 'script' && req.body.manifest) {
       try {
         const m = JSON.parse(fs.readFileSync(manifestPath, 'utf-8'));
-        const idx = m.findIndex(e => e.name === req.body.scriptName);
-        const entry = { name: req.body.scriptName, ...req.body.manifest };
+        const idx = m.findIndex(e => e.scriptName === req.body.scriptName);
+        const entry = { ...req.body.manifest, scriptName: req.body.scriptName };
         if (idx >= 0) m[idx] = { ...m[idx], ...entry };
         else m.push(entry);
         fs.writeFileSync(manifestPath, JSON.stringify(m, null, 2), 'utf-8');
         // 重新載入 scriptMap
         manifest.length = 0;
-        m.forEach(s => { manifest.push(s); scriptMap.set(s.name, s); });
+        scriptMap.clear();
+        toolNameToScript.clear();
+        m.forEach(s => {
+          manifest.push(s);
+          scriptMap.set(s.scriptName, s);
+          toolNameToScript.set(s.name, s.scriptName);
+        });
       } catch (e) {
         console.warn('[Deploy] manifest 更新失敗:', e.message);
       }
@@ -399,7 +407,7 @@ app.delete('/deploy/:name', (req, res) => {
     const scriptBase = path.basename(target, '.py');
     if (scriptMap.has(scriptBase)) {
       scriptMap.delete(scriptBase);
-      const idx = manifest.findIndex(e => e.name === scriptBase);
+      const idx = manifest.findIndex(e => e.scriptName === scriptBase);
       if (idx >= 0) manifest.splice(idx, 1);
     }
     res.json({ success: true, path: target });
@@ -445,7 +453,36 @@ app.post('/cmd', (req, res) => {
 });
 
 // ── 啟動 ──────────────────────────────────────────────────────────
+async function registerWithAccounting() {
+  if (!ACCOUNTING_URL || !AGENT_URL) return;
+  try {
+    const response = await fetch(`${ACCOUNTING_URL}/api/nodes/${encodeURIComponent(NODE_ID)}/connect`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        agentUrl: AGENT_URL,
+        canInstall: true,
+        resources: manifest.map(tool => ({ name: tool.name, version: tool.version ?? '1.0.0', type: 'tool' })),
+      }),
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    console.log(`[Accounting] registered at ${ACCOUNTING_URL}`);
+  } catch (error) {
+    console.warn(`[Accounting] registration failed: ${error.message}`);
+  }
+}
+
+async function heartbeatAccounting() {
+  if (!ACCOUNTING_URL) return;
+  try {
+    const response = await fetch(`${ACCOUNTING_URL}/api/nodes/${encodeURIComponent(NODE_ID)}/heartbeat`, { method: 'POST' });
+    if (response.status === 404) await registerWithAccounting();
+  } catch { /* next heartbeat retries */ }
+}
+
 app.listen(PORT, '0.0.0.0', () => {
+  void registerWithAccounting();
+  setInterval(heartbeatAccounting, 10_000).unref();
   console.log(`[${NODE_ID}] Sub-Web 已啟動 :${PORT}`);
   console.log(`[Scripts]  ${SCRIPTS_DIR}`);
 });
