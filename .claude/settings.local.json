@@ -44,7 +44,12 @@
       "Bash(git commit -m 'feat\\(training\\): rewrite v1 dataset generation pipeline *)",
       "Bash(git commit -m 'docs: add project coordination docs *)",
       "Bash(git commit -m 'chore\\(claude\\): expand allowed bash permissions *)",
-      "Bash(git commit *)"
+      "Bash(git commit *)",
+      "Bash(gh auth *)",
+      "Bash(gh pr *)",
+      "Bash(python -c ' *)",
+      "Bash(git reset *)",
+      "Bash(git restore *)"
     ]
   }
 }
