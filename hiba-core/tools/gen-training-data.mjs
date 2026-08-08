@@ -10,16 +10,17 @@ const string = { type: 'string' };
 const number = { type: 'number' };
 const boolean = { type: 'boolean' };
 
-function tool(name, description, properties, required = []) {
+function tool(name, description, properties, required = [], action = 'read') {
+  const domain = name.split('.')[0];
   return {
     protocolVersion: PROTOCOL_VERSION,
     name,
     version: '1.0.0',
     description,
-    tags: [name.split('.')[0], 'read'],
+    tags: [domain, action],
     inputSchema: { type: 'object', properties, required, additionalProperties: false },
     outputSchema: { type: 'object' },
-    permissions: [],
+    permissions: action === 'read' ? [] : [`${domain}.${action}`],
     timeoutMs: 10_000,
   };
 }
@@ -27,7 +28,7 @@ function tool(name, description, properties, required = []) {
 const TOOLS = [
   tool('material.queryStock', '依料號查詢庫存', { partNumber: string }, ['partNumber']),
   tool('machine.queryStatus', '查詢機台狀態', { machineId: string }, ['machineId']),
-  tool('machine.executeOrder', '執行生產工單', { orderId: string, quantity: number }, ['orderId']),
+  tool('machine.executeOrder', '執行生產工單', { orderId: string, quantity: number }, ['orderId'], 'write'),
   tool('env.readSensor', '讀取環境感測器', { sensorId: string }),
   tool('env.alertThreshold', '設定感測器告警門檻', {
     sensorId: string,
@@ -36,13 +37,13 @@ const TOOLS = [
       properties: { min: number, max: number, alertChannel: string },
       additionalProperties: false,
     },
-  }, ['sensorId', 'thresholdConfig']),
+  }, ['sensorId', 'thresholdConfig'], 'write'),
   tool('method.fetchSop', '取得標準作業程序', {
     sopCode: string,
     language: { type: 'string', enum: ['zh-TW', 'en-US'] },
   }, ['sopCode']),
   tool('man.verifyOperatorCert', '驗證操作員技能證照', { employeeId: string, skillCode: string }, ['employeeId', 'skillCode']),
-  tool('material.protectFile', '保護檔案並建立稽核紀錄', { filePath: string, keepFile: boolean }, ['filePath']),
+  tool('material.protectFile', '保護檔案並建立稽核紀錄', { filePath: string, keepFile: boolean }, ['filePath'], 'write'),
   tool('material.verifyFile', '驗證檔案完整性', { filePath: string }, ['filePath']),
   tool('orchestrator.echoRtt', '測試節點往返延遲', { message: string, sentAt: string }),
 ];
