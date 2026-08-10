@@ -1252,8 +1252,19 @@ function renderHealth() {
 
 // ── Script Card Helpers ───────────────────────────────────────────────────
 function schemaFields(schema) {
-  const required = new Set(schema?.required || []);
-  return Object.entries(schema?.properties || {}).map(([key, meta]) => [key, { ...meta, required: required.has(key) }]);
+  if (!schema) return [];
+  // 新版 schema（JSON Schema draft-07）：{ type:'object', properties:{...}, required:[...] }
+  if (schema.properties) {
+    const required = new Set(schema.required || []);
+    return Object.entries(schema.properties).map(([key, meta]) => [key, { ...meta, required: required.has(key) }]);
+  }
+  // 舊版扁平 schema（部分節點尚未更新）：{ key: { type, required, description } }
+  return Object.entries(schema).map(([key, meta]) => [key, { ...meta, required: !!meta.required }]);
+}
+
+// 腳本唯一識別碼：新版 manifest 用 scriptName，舊版只有 name
+function scriptId(s) {
+  return s.scriptName || s.name;
 }
 
 function buildSchemaTable(s) {
@@ -1340,8 +1351,8 @@ async function renderScripts() {
     return;
   }
 
-  const favScripts  = node.scripts.filter(s => favorites.has(s.scriptName));
-  const restScripts = node.scripts.filter(s => !favorites.has(s.scriptName));
+  const favScripts  = node.scripts.filter(s => favorites.has(scriptId(s)));
+  const restScripts = node.scripts.filter(s => !favorites.has(scriptId(s)));
 
   const favSection = favScripts.length ? `
     <div class="section-label">⭐ 標記常用 <span style="color:var(--yellow);font-size:11px">${favScripts.length}</span></div>
@@ -1362,16 +1373,16 @@ async function renderScripts() {
 }
 
 function buildScriptCard(s, nodeId) {
-  const isFav  = favorites.has(s.scriptName);
-  const cardId = `body_${nodeId}_${s.scriptName}`;
-  const uid    = `${nodeId}_${s.scriptName}`;
+  const isFav  = favorites.has(scriptId(s));
+  const cardId = `body_${nodeId}_${scriptId(s)}`;
+  const uid    = `${nodeId}_${scriptId(s)}`;
   const paramFields = buildParamFields(s, uid);
   return `
     <div class="script-item">
       <div class="script-header" onclick="toggleScript('${cardId}')">
         <button class="fav-star ${isFav ? 'active' : ''}"
           title="${isFav ? '取消最愛' : '加入最愛'}"
-          onclick="event.stopPropagation();toggleFavorite('${s.scriptName}')">${isFav ? '★' : '☆'}</button>
+          onclick="event.stopPropagation();toggleFavorite('${scriptId(s)}')">${isFav ? '★' : '☆'}</button>
         <span class="script-name">${s.name}</span>
         <span class="script-desc">${s.description || ''}</span>
         <span class="badge ${s.renderHint || 'text'}">${s.renderHint || 'text'}</span>
@@ -1382,7 +1393,7 @@ function buildScriptCard(s, nodeId) {
         <div style="border-top:1px solid var(--border);margin:0 -16px 14px;"></div>
         ${paramFields || '<p style="color:var(--muted);font-size:12px;margin-bottom:10px">No parameters required</p>'}
         ${buildAttachWidget(`att_${uid}`)}
-        <button class="run-btn" id="runbtn_${uid}" onclick="runScriptInline('${nodeId}','${s.scriptName}')">▶ Execute</button>
+        <button class="run-btn" id="runbtn_${uid}" onclick="runScriptInline('${nodeId}','${scriptId(s)}')">▶ Execute</button>
         <div id="sresult_${uid}"></div>
       </div>
     </div>`;
@@ -1397,7 +1408,7 @@ function toggleFavorite(scriptName) {
 
 async function runScriptInline(nodeId, scriptName) {
   const node = nodes.get(nodeId);
-  const s = node?.scripts.find(x => x.scriptName === scriptName);
+  const s = node?.scripts.find(x => scriptId(x) === scriptName);
   if (!node || !s) return;
   const uid = `${nodeId}_${scriptName}`;
   const btn = document.getElementById(`runbtn_${uid}`);
