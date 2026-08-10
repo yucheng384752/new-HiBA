@@ -12,6 +12,13 @@ export interface HttpLLMClientOptions {
    * 'ollama' → POST /api/generate with prompt string
    */
   format?: 'openai' | 'ollama';
+  /**
+   * Sampling temperature forwarded to the LLM. Lower values make tool-name
+   * selection more deterministic and less likely to hallucinate names outside
+   * the provided catalog (e.g. "cnc_job.sh" instead of a registered tool).
+   * Default: 0.1.
+   */
+  temperature?: number;
   /** Replace the entire system prompt builder — gives maximum flexibility */
   systemPromptTemplate?: (
     resources: NodeResourceMap,
@@ -63,6 +70,7 @@ export class HttpLLMClient implements LLMClient {
         { role: 'user',    content: task   },
       ],
       response_format: { type: 'json_object' },
+      temperature: this.options.temperature ?? 0.1,
     };
   }
 
@@ -72,6 +80,7 @@ export class HttpLLMClient implements LLMClient {
       prompt: `${system}\n\nUser task: ${task}`,
       format: 'json',
       stream: false,
+      options: { temperature: this.options.temperature ?? 0.1 },
     };
   }
 }
@@ -114,8 +123,7 @@ function buildDefaultSystemPrompt(
   const toolBlock = tools.length
     ? tools.map(tool => [
         `  - ${tool.name}@${tool.version}: ${tool.description}`,
-        `    inputSchema: ${JSON.stringify(tool.inputSchema)}`,
-        `    outputSchema: ${JSON.stringify(tool.outputSchema)}`,
+        `    input: ${summarizeInputSchema(tool.inputSchema)}`,
       ].join('\n')).join('\n')
     : '  (no tools registered)';
 
@@ -131,28 +139,70 @@ ${nodeBlock}
 ## Available Tools
 ${toolBlock}
 
-## Output — return ONLY valid JSON, no markdown wrapper, no explanation:
+## Output — return ONLY valid JSON, no markdown wrapper, no explanation. This
+## shows the required shape only — toolName/version below are placeholders,
+## NOT real tools; always pick real ones from "Available Tools" above:
 {
   "protocolVersion": "1.0",
   "steps": [
     {
       "stepId":    "S1",
-      "toolName":  "material.protectFile",
-      "nodeId":    "node1",
-      "version":   "1.0.0",
-      "input":     { "filePath": "/path/to/resource" },
+      "toolName":  "<copied verbatim from Available Tools>",
+      "nodeId":    "<an online node from Live Node Descriptors>",
+      "version":   "<copied verbatim from the same Available Tools entry>",
+      "input":     { "...": "must match that tool's input fields" },
       "dependsOn": []
     }
   ],
   "supervisorPolicy": "fail-fast"
 }
 
+## Worked example (illustrates the rule below, not a fixed tool to reuse)
+Task: "查詢 CNC-01 機台狀態"
+Given "Available Tools" contains: machine.queryStatus@1.0.0 — 機台狀態查詢
+(input: machineId: string (required))
+Correct plan:
+{"protocolVersion":"1.0","steps":[{"stepId":"S1","toolName":"machine.queryStatus","nodeId":"node1","version":"1.0.0","input":{"machineId":"CNC-01"},"dependsOn":[]}],"supervisorPolicy":"fail-fast"}
+
 ## Rules
-1. toolName and version must exactly match an Available Tools entry
-2. nodeId must be an online node that advertises the tool, or an online node with canInstall=true
-3. stepId must be unique: S1, S2, S3, ...
-4. dependsOn lists stepIds that must complete before this step
-5. input must validate against the tool's inputSchema; never invent parameter names
-6. protocolVersion must be "1.0"
-7. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
+1. toolName MUST be copied character-for-character from an "Available Tools"
+   entry above. NEVER invent, translate, abbreviate, or guess a plausible-
+   sounding name (e.g. "cnc_job.sh", "run_cnc", "qc_check.sh" are all
+   WRONG — they are not in the list). If no tool in the list fits the task,
+   return {"steps": [], "supervisorPolicy": "fail-fast", "error": "no matching tool for task"}.
+2. version must be copied from the same Available Tools entry as toolName.
+3. nodeId must be an online node that advertises the tool, or an online node with canInstall=true
+4. stepId must be unique: S1, S2, S3, ...
+5. dependsOn lists stepIds that must complete before this step
+6. input must validate against the tool's inputSchema; never invent parameter names
+7. protocolVersion must be "1.0"
+8. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
+}
+
+/**
+ * Renders a tool's inputSchema (full zod-to-json-schema output) as one compact
+ * line instead of dumping the raw JSON schema. The raw form repeats `$schema`,
+ * `additionalProperties`, and nested `type` wrappers for every property on every
+ * tool, which was blowing the prompt past the local LLM's 4096-token context
+ * window (36 registered tools × input+output schema ≈ 8.4k tokens). The LLM
+ * only needs field name / type / required / description to fill `input` — it
+ * never reads outputSchema, so that block is dropped entirely (see caller).
+ */
+export function summarizeInputSchema(schema: Record<string, unknown>): string {
+  const properties = schema['properties'];
+  if (!properties || typeof properties !== 'object') return '(no parameters)';
+
+  const required = new Set(
+    Array.isArray(schema['required']) ? (schema['required'] as unknown[]).filter((r): r is string => typeof r === 'string') : [],
+  );
+
+  const fields = Object.entries(properties as Record<string, unknown>).map(([name, propRaw]) => {
+    const prop = (propRaw && typeof propRaw === 'object') ? propRaw as Record<string, unknown> : {};
+    const type = typeof prop['type'] === 'string' ? prop['type'] : 'any';
+    const desc = typeof prop['description'] === 'string' ? ` — ${prop['description']}` : '';
+    const req  = required.has(name) ? 'required' : 'optional';
+    return `${name}: ${type} (${req})${desc}`;
+  });
+
+  return fields.length ? fields.join('; ') : '(no parameters)';
 }

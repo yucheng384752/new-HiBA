@@ -66,6 +66,12 @@ function startService(service) {
     env: { ...process.env, ...service.env },
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
+    // Own process group so a Ctrl+C in this console doesn't hit the child
+    // directly. Without this, Windows delivers CTRL_C_EVENT to every
+    // process sharing the console at once, and the child can exit before
+    // shutdown() below sets `stopping`, making a normal Ctrl+C look like
+    // an unexpected crash. The parent still relays SIGINT via kill() below.
+    detached: true,
   });
   children.push(child);
   child.stdout.on('data', data => log(service.name, data));
