@@ -1,5 +1,7 @@
 # deploy_http — HTTP Sub-Web 節點部署說明書
 
+> Manifest 最新規範版本：Tool `1.0.0` / metadata schema `1.0`。兩者獨立版控；只更新說明或摘要 metadata 不得提升 Tool 執行版本。每個腳本必須提供 `description`、`inputSchema`、`outputSchema` 與 `summaryHints`；Node 的 `/scripts` 是 Accounting 與 LLM 摘要的資料來源。完整規範見 `HiBA腳本Manifest與LLM摘要規範.md`。
+
 ## 概覽
 
 此資料夾用於將 Raspberry Pi 設定為 **HTTP REST Sub-Web 節點**，提供以下功能：

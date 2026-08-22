@@ -38,6 +38,15 @@ describe('allHibaTools', () => {
       expect(tool.name).toMatch(/^(material|machine|man|method|env|orchestrator)\.[a-z][A-Za-z0-9]*$/);
     }
   });
+
+  test('machine.queryStatus accepts the CNC node response shape', () => {
+    const tool = allHibaTools.find(item => item.name === 'machine.queryStatus');
+    const parsed = tool?.outputSchema.safeParse({
+      machineId: 'CNC-01', status: 'running', oee: 90.8, alarms: [],
+      queriedAt: '2026-08-22T12:42:01.557Z', orderId: 'WO-2026-001',
+    });
+    expect(parsed?.success).toBe(true);
+  });
 });
 
 describe('registerHibaTools', () => {
@@ -257,5 +266,11 @@ describe('env.verifyFileIo — 2-phase probe→write 序列', () => {
     for (const name of piTools) {
       expect(tb.has(name as import('../types/hiba.types').ToolName)).toBe(true);
     }
+  });
+
+  test('machine.executeOrder 要求 machineId 與 orderId', () => {
+    const tool = allHibaTools.find(t => t.name === 'machine.executeOrder')!;
+    expect(tool.inputSchema.safeParse({ orderId: '20260813-01' }).success).toBe(false);
+    expect(tool.inputSchema.safeParse({ machineId: 'CNC-01', orderId: '20260813-01' }).success).toBe(true);
   });
 });
