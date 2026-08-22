@@ -53,6 +53,9 @@ async function main(): Promise<void> {
   const orchestrator = new OrchestratorRunner(toolbox, audit, {
     nodeAddresses,
     accountingUrl: env('ACCOUNTING_URL', 'http://localhost:9090'),
+    dispatchTimeoutMs: Number(env('DISPATCH_TIMEOUT_MS', '30000')),
+    reconnectAttempts: Number(env('RECONNECT_ATTEMPTS', '1')),
+    reconnectDelayMs: Number(env('RECONNECT_DELAY_MS', '1000')),
   });
 
   const server = new AgentServer(planning, {

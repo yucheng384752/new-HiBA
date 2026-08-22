@@ -21,7 +21,7 @@
 import { test, expect, beforeAll, afterAll, describe } from '@jest/globals';
 import http from 'node:http';
 import { z } from 'zod';
-import { OrchestratorRunner, parseNodeAddresses } from './OrchestratorRunner';
+import { OrchestratorRunner, parseNodeAddresses, type OrchestratorOptions } from './OrchestratorRunner';
 import { AgentServer } from './AgentServer';
 import { HiBAToolbox } from '../core/HiBAToolbox';
 import { AuditTrail } from '../audit/AuditTrail';
@@ -40,7 +40,7 @@ const BASE_CTX: ToolContext = {
   permissions: ['material.write', 'material.read'],
 };
 
-function makeRunner(anchorShouldFail = false, nodeAddresses?: Map<string, string>, accountingUrl?: string, auditOut?: AuditTrail[]) {
+function makeRunner(anchorShouldFail = false, nodeAddresses?: Map<string, string>, accountingUrl?: string, auditOut?: AuditTrail[], options: OrchestratorOptions = {}) {
   const audit = new AuditTrail(':memory:');
   auditOut?.push(audit);
   // Always mock batchUploadToChain — tests run without a live accounting server
@@ -87,7 +87,7 @@ function makeRunner(anchorShouldFail = false, nodeAddresses?: Map<string, string
     handler: async () => { throw new Error('intentional failure'); },
   }));
 
-  return new OrchestratorRunner(toolbox, audit, { nodeAddresses, accountingUrl });
+  return new OrchestratorRunner(toolbox, audit, { nodeAddresses, accountingUrl, ...options });
 }
 
 function step(
@@ -345,7 +345,7 @@ describe('remote dispatch', () => {
     })]);
   });
 
-  test('remote node returns non-200 → ToolFailure with HANDLER_EXECUTION_FAILED', async () => {
+  test('remote node connection failure → retryable NODE_OFFLINE', async () => {
     // Port with no server → connection refused
     const nodeAddresses = new Map([['node-dead', 'http://localhost:19999']]);
     const runner = makeRunner(false, nodeAddresses);
@@ -358,7 +358,7 @@ describe('remote dispatch', () => {
     expect(result.steps[0]?.dispatched).toBe('remote');
     expect(result.failed).toBe(1);
     const failure = result.steps[0]?.result as { success: false; errorCode: string };
-    expect(failure.errorCode).toBe('HANDLER_EXECUTION_FAILED');
+    expect(failure.errorCode).toBe('NODE_OFFLINE');
   });
 
   test('rejects a successful remote response whose output violates ToolSpec', async () => {
@@ -445,6 +445,73 @@ describe('dynamic node discovery', () => {
     const result = await runner.run(plan, BASE_CTX);
     expect(result.succeeded).toBe(1);
     expect(result.steps[0]?.dispatched).toBe('remote');
+  });
+
+  test('preserves remote error details for non-200 responses', async () => {
+    const errorPort = 18202;
+    const errorNode = http.createServer((_req, res) => {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'EXECUTION_ERROR', stderr: 'unknown orderId: demo-01' }));
+    });
+    await new Promise<void>(resolve => errorNode.listen(errorPort, resolve));
+    try {
+      const runner = makeRunner(false, new Map([['node-error', `http://localhost:${errorPort}`]]));
+      const result = await runner.run({
+        steps: [{ stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-error',
+          version: '1.0.0', input: { filePath: '/x' }, dependsOn: [] }],
+        supervisorPolicy: 'fail-fast',
+      }, BASE_CTX);
+
+      expect(result.steps[0]?.result).toEqual(expect.objectContaining({
+        success: false,
+        error: expect.stringContaining('unknown orderId: demo-01'),
+        details: expect.objectContaining({ remoteResponse: expect.objectContaining({ error: 'EXECUTION_ERROR' }) }),
+      }));
+    } finally {
+      await new Promise<void>((resolve, reject) => errorNode.close(error => error ? reject(error) : resolve()));
+    }
+  });
+
+  test('reconnect exhaustion fails over to another online node with the same tool', async () => {
+    const primaryPort = 18301;
+    const idempotencyKeys: string[] = [];
+    let primaryRequests = 0;
+    const primaryNode = http.createServer((req) => {
+      primaryRequests++;
+      idempotencyKeys.push(String(req.headers['x-idempotency-key']));
+      // Deliberately never respond: Orchestrator must time out and reconnect.
+    });
+    await new Promise<void>(resolve => primaryNode.listen(primaryPort, resolve));
+    try {
+      registeredNodes = [
+        {
+          nodeId: 'node-primary', agentUrl: `http://localhost:${primaryPort}`, status: 'online',
+          resources: [{ name: 'material.protectFile', version: '1.0.0', type: 'tool' }],
+        },
+        {
+          nodeId: 'node-backup', agentUrl: `http://localhost:${remotePort}`, status: 'online',
+          resources: [{ name: 'material.protectFile', version: '1.0.0', type: 'tool' }],
+        },
+      ];
+      const runner = makeRunner(false, new Map(), `http://localhost:${accountingPort}`, undefined, {
+        dispatchTimeoutMs: 25,
+        reconnectAttempts: 1,
+        reconnectDelayMs: 0,
+      });
+      const result = await runner.run({
+        steps: [{ stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-primary',
+          version: '1.0.0', input: { filePath: '/failover.xml' }, dependsOn: [] }],
+        supervisorPolicy: 'fail-fast',
+      }, BASE_CTX);
+
+      expect(primaryRequests).toBe(2);
+      expect(new Set(idempotencyKeys)).toEqual(new Set([`${BASE_CTX.traceId}:S1`]));
+      expect(result.succeeded).toBe(1);
+      expect(result.steps[0]).toEqual(expect.objectContaining({ nodeId: 'node-backup', dispatched: 'remote' }));
+    } finally {
+      primaryNode.closeAllConnections();
+      await new Promise<void>((resolve, reject) => primaryNode.close(error => error ? reject(error) : resolve()));
+    }
   });
 
   test('static address takes precedence over dynamic', async () => {
