@@ -23,7 +23,18 @@ async function main(): Promise<void> {
     {
       model:       env('LLM_MODEL',  'hiba-planner'),
       format:      env('LLM_FORMAT', 'openai') as 'openai' | 'ollama',
+      timeoutMs:   Number(env('LLM_TIMEOUT_MS', '120000')),
       temperature: process.env['LLM_TEMPERATURE'] !== undefined ? Number(process.env['LLM_TEMPERATURE']) : undefined,
+    },
+  );
+
+  const summaryLLM = new HttpLLMClient(
+    env('LLM_URL', 'http://localhost:11434/v1/chat/completions'),
+    {
+      model:       env('SUMMARY_LLM_MODEL', 'llama3.1:latest'),
+      format:      env('LLM_FORMAT', 'openai') as 'openai' | 'ollama',
+      timeoutMs:   Number(env('LLM_TIMEOUT_MS', '120000')),
+      temperature: Number(env('SUMMARY_LLM_TEMPERATURE', '0')),
     },
   );
 
@@ -44,7 +55,7 @@ async function main(): Promise<void> {
   registerHibaTools(toolbox);
   registerAuditTools(toolbox, audit);
 
-  const planning = new NLPlanningService(llm, accounting, { toolbox });
+  const planning = new NLPlanningService(llm, accounting, { toolbox, summaryLLM });
 
   const nodeAddresses = process.env['NODE_ADDRESSES']
     ? parseNodeAddresses(process.env['NODE_ADDRESSES'])

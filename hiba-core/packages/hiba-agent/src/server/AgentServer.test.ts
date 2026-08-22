@@ -63,8 +63,11 @@ function request(
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const mockLLM: LLMClient = {
-  complete: async () => ({
-    rawJson: {
+  complete: async payload => ({
+    rawJson: payload.systemPrompt ? {
+      summary: 'CNC-01 機台目前運行中。',
+      steps: [{ stepId: 'S1', summary: '查詢成功。' }],
+    } : {
       steps: [{
         stepId: 'S1',
         toolName: 'material.protectFile',
@@ -343,6 +346,22 @@ test('POST /api/plan without task returns 400', async () => {
     errorCode: 'REQUEST_INVALID',
     retryable: false,
   }));
+});
+
+test('POST /api/summarize returns validated natural-language result', async () => {
+  const res = await request(port, 'POST', '/api/summarize', {
+    task: '確認 m2 的 CNC-01 機台狀態',
+    run: { steps: [{ stepId: 'S1', result: { success: true } }] },
+  });
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual({
+    summary: 'CNC-01 機台目前運行中。',
+    steps: [{ stepId: 'S1', summary: '查詢成功。' }],
+  });
+});
+
+test('POST /api/summarize requires task and run', async () => {
+  expect((await request(port, 'POST', '/api/summarize', { task: 'x' })).status).toBe(400);
 });
 
 test('persistent workflow closes plan, run, poll, and result loop', async () => {

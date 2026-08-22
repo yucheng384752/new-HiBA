@@ -254,6 +254,37 @@ describe('NLPlanningService', () => {
     }));
   });
 
+  it('summarizes execution results with a fact-only prompt', async () => {
+    const plannerLLM = makeLLM(validPlanJson);
+    const summaryLLM = makeLLM({
+      steps: [{ stepId: 'S1', summary: '查詢成功。' }],
+    });
+    const accounting = makeAccounting({
+      node1: [{
+        name: 'machine.queryStatus', version: '1.1.0', type: 'tool', metadata: {
+          description: '查詢機台狀態',
+          outputSchema: { orderId: { type: 'string', description: '目前工單' } },
+          summaryHints: ['有 orderId 時必須說明目前工單'],
+        },
+      }],
+    });
+    const summary = await new NLPlanningService(plannerLLM, accounting, { summaryLLM }).summarize(
+      '確認 CNC-01 狀態',
+      { steps: [{ stepId: 'S1', nodeId: 'node1', toolName: 'machine.queryStatus', result: { success: true } }] },
+    );
+    expect(summary.summary).toBe('查詢成功。');
+    expect(summary.steps[0]?.stepId).toBe('S1');
+    expect(summaryLLM.complete).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining('不得推測'),
+      task: expect.stringContaining('CNC-01'),
+    }));
+    expect(summaryLLM.complete).toHaveBeenCalledWith(expect.objectContaining({
+      task: expect.stringContaining('有 orderId 時必須說明目前工單'),
+    }));
+    expect(accounting.listNodeResources).toHaveBeenCalledTimes(1);
+    expect(plannerLLM.complete).not.toHaveBeenCalled();
+  });
+
   it('fills default version "1.0.0" when LLM omits it', async () => {
     const planWithoutVersion = {
       steps: [
