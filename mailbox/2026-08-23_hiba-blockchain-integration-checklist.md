@@ -34,7 +34,24 @@
 3. 把 `forge create` 印出的合約地址填回 `env.json` 對應欄位；私鑰同一組直接填入。
 4. （選用）用 `web3j generate solidity` 從 ABI/BIN 產生 Java 包裝類——`FileProtectionContract.java` 已經在 repo 裡了，只有換合約版本才需要重產生。
 
+## 部署結果（2026-08-23，同日完成）
+
+使用者確認要從頭部署，選定 Sepolia（本機連不到 `env.json` 設定的區網 Anvil `192.168.1.60:8545`）、公開免申請 RPC `https://ethereum-sepolia-rpc.publicnode.com`、使用者自有錢包（`0x482D8AAd1cfa61996f631e6682B09a4E8a6D9F91`，部署前餘額 8.074 ETH）簽署。
+
+安全處理：私鑰貼出後先用 `ethers.Wallet` 驗證確實對應該地址，再**只**寫入 `hiba-core/.env.local`（已在 commit `eb3350e` 補上 `.gitignore` 排除規則），從頭到尾沒有寫進 `env.json` 或任何會被 git 追蹤的檔案。本機沒有 `forge`/`anvil`，改用 Node.js（`solc` + `ethers`，裝在 scratchpad，不在任一 repo 內）編譯並部署，繞過裝 Foundry 的需求。
+
+| 合約 | 地址 | 部署 tx |
+|---|---|---|
+| `FileProtectionContract` | `0x3366D83cd1C7F3f65006C4c176d5F4a4DA45a488` | `0xc533e2e7645a9c6b12c486c828053784124bc27a5e40324f5d76ce0a3d4f5353` |
+| `TPMDeviceRegistry` | `0x0968dc3b04Ed6a97280F56358F210d738aA86441` | `0x29b352ef83347bfa02988261b554ba94eb52e7986089e8d157311333099d6428` |
+
+部署後跑了端對端功能驗證（非只是查 bytecode 存在）：`FileProtectionContract.storeFile()` 寫入一筆測試檔案 metadata 並 mined 成功；`TPMDeviceRegistry.registerDevice()` 註冊一個測試 TPM fingerprint，`isDeviceRegistered()`／`getPublicKey()` 讀回結果與寫入值完全一致。部署+驗證共花費約 0.0054 ETH gas（餘額 8.074 → 8.0686）。
+
+`hiba-core/.env.local` 現在同時持有 RPC／私鑰／兩個合約地址，`SystemConfigurationLoader` 會優先讀這些環境變數（見上方需要提供的資料表），`env.json` 本身維持空字串不動——啟動 Java 服務前記得先把 `.env.local` 的內容 export 進行程序環境（這個 repo 沒有 dotenv 自動載入機制）。
+
 ## 待辦 / 已知落差
 
-- 私鑰不可入庫（`docs/BLOCKCHAIN.md` 已明確警告）。要提供的私鑰應該用環境變數傳入（`TPM_DEVICE_REGISTRY_PRIVATE_KEY` 等），不要直接寫進 `env.json` 再一起 commit——`env.json` 目前是明碼放兩把私鑰欄位的設計，之後若要真的填值，建議連同 `.gitignore`/機密管理方式一併檢查，這不在這次盤點範圍內，先記著。
-- 這批工作在 `Desktop\hiba`（獨立 git repo，Java/Maven），跟本 repo（HiBA-AB）技術棧不同、也不共用 git 歷史；填完 `env.json` 之後的驗證方式（例如跑哪個測試/腳本確認上鏈成功）還沒盤點，需要時再展開。
+- 私鑰不可入庫（`docs/BLOCKCHAIN.md` 已明確警告）——已處理，見上方部署結果段落。
+- 這批工作在 `Desktop\hiba`（獨立 git repo，Java/Maven），跟本 repo（HiBA-AB）技術棧不同、也不共用 git 歷史。
+- `.env.local` 目前需要手動 `export` 或透過啟動腳本帶入程序環境，還沒有自動載入機制；如果之後要長期用，值得補一個輕量 dotenv 載入或啟動腳本包裝，這次沒做。
+- 部署用的錢包餘額還有 8 ETH 測試幣，之後若要棄用這把私鑰，記得先把餘額轉走。
