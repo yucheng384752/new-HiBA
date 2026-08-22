@@ -86,6 +86,8 @@ describe('HttpLLMClient system prompt', () => {
 
     const systemPrompt = capturedBody!.messages[0]!.content;
     expect(systemPrompt).not.toContain('outputSchema');
+    expect(systemPrompt).toContain('Use the minimum number of steps');
+    expect(systemPrompt).toContain('machine.executeOrder step');
     // Rough token proxy: ~4 chars/token. Must clear headroom under a 4096-token
     // local context window even with 36 tools registered.
     expect(systemPrompt.length / 4).toBeLessThan(3500);

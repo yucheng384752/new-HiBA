@@ -95,11 +95,39 @@ export class NLPlanningService {
     const tools = registeredTools.map(toToolSpec);
 
     const { rawJson } = await this.llm.complete({ task, resources, nodes, tools });
-    const plan = this.parsePlan(rawJson);
+    let plan = this.parsePlan(rawJson);
+    if (this.options.toolbox && !plan.error) {
+      const toolMap = new Map(registeredTools.map(tool => [tool.name, tool]));
+      plan = {
+        ...plan,
+        steps: plan.steps.map(step => {
+          const parsed = toolMap.get(step.toolName)?.inputSchema.safeParse(step.input);
+          return parsed?.success ? { ...step, input: parsed.data } : step;
+        }),
+      };
+      if (/(接續|依序|然後|再由|\bafter\b|\bthen\b)/i.test(task)
+          && plan.steps.length > 1
+          && plan.steps.every(step => step.dependsOn.length === 0)) {
+        plan = {
+          ...plan,
+          steps: plan.steps.map((step, index) => index === 0
+            ? step
+            : { ...step, dependsOn: [plan.steps[index - 1]!.stepId] }),
+        };
+      }
+    }
     if (plan.error || !this.options.toolbox) return plan;
 
     const validation = validatePlan(plan, { tools: registeredTools, nodes });
     if (validation.valid) return validation.plan;
+    const canAskUser = validation.issues.every(issue => issue.code === 'INPUT_REQUIRED' || issue.code === 'INPUT_INVALID');
+    if (canAskUser) {
+      return {
+        ...plan,
+        validationIssues: validation.issues,
+        missingInputs: validation.missingInputs,
+      };
+    }
     return {
       ...plan,
       steps: [],

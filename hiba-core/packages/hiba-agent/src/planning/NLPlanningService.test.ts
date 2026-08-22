@@ -135,7 +135,8 @@ describe('NLPlanningService', () => {
 
     const plan = await svc.plan('protect a file', ctx);
 
-    expect(plan.steps).toEqual([]);
+    expect(plan.steps).toHaveLength(1);
+    expect(plan.error).toBeUndefined();
     expect(plan.validationIssues).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'INPUT_REQUIRED', field: 'filePath' }),
     ]));
@@ -210,6 +211,27 @@ describe('NLPlanningService', () => {
 
     expect(result).toEqual(mockResources);
     expect(accounting.listNodeResources).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes sequential intent and removes unknown tool input fields', async () => {
+    const rawPlan = {
+      ...validPlanJson,
+      steps: [
+        validPlanJson.steps[0],
+        {
+          ...validPlanJson.steps[0], stepId: 'S2',
+          input: { filePath: '/tmp/second.xml', supervisorPolicy: 'fail-fast' },
+        },
+      ],
+    };
+    const svc = new NLPlanningService(makeLLM(rawPlan), makeAccounting(), {
+      toolbox: { list: () => [protectFileTool] },
+    });
+
+    const plan = await svc.plan('先處理第一項，然後接續處理第二項', ctx);
+
+    expect(plan.steps[1]!.dependsOn).toEqual(['S1']);
+    expect(plan.steps[1]!.input).toEqual({ filePath: '/tmp/second.xml' });
   });
 
   it('fills default version "1.0.0" when LLM omits it', async () => {

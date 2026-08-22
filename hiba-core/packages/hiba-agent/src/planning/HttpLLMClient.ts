@@ -176,7 +176,14 @@ Correct plan:
 5. dependsOn lists stepIds that must complete before this step
 6. input must validate against the tool's inputSchema; never invent parameter names
 7. protocolVersion must be "1.0"
-8. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
+8. Use the minimum number of steps that directly satisfy the task. Do not add
+   status checks, material/attachment operations, or orchestration helpers
+   unless the user explicitly requests them.
+9. Each explicitly requested machine/order execution maps to exactly one
+   machine.executeOrder step. Preserve its nodeId, machineId, and orderId.
+   Words such as "接續", "然後", or "after" mean the later step dependsOn the
+   preceding step.
+10. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
 }
 
 /**
