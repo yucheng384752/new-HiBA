@@ -53,5 +53,5 @@
 
 - 私鑰不可入庫（`docs/BLOCKCHAIN.md` 已明確警告）——已處理，見上方部署結果段落。
 - 這批工作在 `Desktop\hiba`（獨立 git repo，Java/Maven），跟本 repo（HiBA-AB）技術棧不同、也不共用 git 歷史。
-- `.env.local` 目前需要手動 `export` 或透過啟動腳本帶入程序環境，還沒有自動載入機制；如果之後要長期用，值得補一個輕量 dotenv 載入或啟動腳本包裝，這次沒做。
+- 已補上 `run-with-blockchain-env.sh`（commit `14f29b7`，`Desktop\hiba` 根目錄）：載入 `.env.local` 進程序環境、必要時跑 `make package`、再啟動 `output/hiba-core-*.jar`；並且會檢查 `.env.local` 是否意外被 git 追蹤，追蹤到就直接拒絕執行。只驗證過 `--print-env`（安全、不啟動任何服務）；沒有實際跑過完整啟動，因為 `AutoTrackStarter` 會開網路服務（multicast 等），這部分留給使用者自己手動執行確認。
 - 部署用的錢包餘額還有 8 ETH 測試幣，之後若要棄用這把私鑰，記得先把餘額轉走。
