@@ -88,7 +88,8 @@
       "Bash(rm -f /c/Users/gslab/Desktop/files/live_scripts_tmp.json)",
       "Read(//c/Users/gslab/.ssh/**)",
       "Bash(ssh 192.168.200.23 *)",
-      "Bash(ssh gslab@192.168.200.23 *)"
+      "Bash(ssh gslab@192.168.200.23 *)",
+      "Bash(ssh -p * user@163.18.49.35 *)"
     ]
   }
 }

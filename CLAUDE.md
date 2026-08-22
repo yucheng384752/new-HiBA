@@ -20,6 +20,8 @@ HiBA-AB：工廠產線 Agent 任務編排系統（研究專案，見 `HiBA-AB_�
 
 ## 架構總覽 (Architecture)
 
+> 本 repo（HiBA-AB）是在 `C:\Users\gslab\Desktop\hiba`（Java HiBA 正式版：Broker 拓樸、TPM 簽章、區塊鏈檔案完整性）**的基礎上**，加入 **LLM 智慧任務分派**與**統一 Dashboard 整合**的擴充層，細節見文末「HiBA程式碼核心」小節。
+
 ```
 Claw Dashboard (claw-dashboard.html)
         │  NL 任務 / 手動操作
@@ -142,3 +144,33 @@ curl http://localhost:3000/health
 
 ## obsidian 筆記位址
 - C:\Users\gslab\Desktop\HiBA-AB-Vault\HiBA-AB-Vault，所有相關紀錄，或是關鍵字可寫入此份筆記內
+
+## HiBA程式碼核心
+- C:\Users\gslab\Desktop\hiba(尚未在本機完成區塊鏈相關內容整合)
+
+### 深度掃描摘要（2026-08-23）
+
+獨立 git repo（`git@github.com:socomni/hiba.git`，目前在 `dev` 分支），與本 repo 技術棧完全不同，關係待確認（見下方「待確認」）——以下先如實記錄掃描結果：
+
+- **技術棧**：Java 21 + Netty（自定義二進位協定）+ Web3j（Ethereum 客戶端）+ Solidity（智慧合約）+ Ansible（部署）+ Maven（多模組：`hiba-common` / `hiba-core` / `hiba-service-ntp`，parent artifact `com.socomni:hiba-management`）
+- **核心概念**：階層式 Broker 架構（Hierarchical Broker Architecture）。節點間以 Netty 自定義二進位協定（Magic `GSLAB` + Header 16 bytes）通訊，任務走 Taker → Distributor → Executor 流水線；每則訊息經 TPM 硬體簽章、接收端做四階段驗證（Timestamp → Nonce 防重放 → TPM 簽章 → 區塊鏈公鑰比對）
+- **區塊鏈整合**：
+  - `hiba-core/contract/FileMetadataContract.sol`（檔案 metadata 上鏈）、`TPMDeviceRegistry.sol`（TPM 裝置 PKI，Owner/Admin RBAC）
+  - Java 服務層以 `BlockchainService` 介面切換 `Web3jBlockchainServiceImpl`（正式上鏈）/ `MockBlockchainServiceImpl`（測試用 In-Memory）
+  - **已核實「尚未整合」**：本機 `hiba-core/env.json` 的 `BlockchainFileProtect.contractAddress`、`.privateKey`、`BlockchainTPMRegistry.contractAddress`、`.privateKey` 目前均為空字串——合約尚未部署／憑證尚未填入，即便 `HiBANetwork.BlockchainFileProtect` 開關已經是 `true`。可用 Anvil 本地鏈（`http://192.168.1.60:8545`，networkID 31337）或 Sepolia 補齊
+- **測試環境**：11 台 PVE VM（1 台 accounting-server + 10 台 worker node），透過固定 port-forwarding 規則從 `163.18.49.35`（各節點對應不同 port，如 30122/30322…）SSH 進入——`.claude/settings.local.json` 裡的 ssh alias 就是連到這批節點裡的其中一台
+- **部署方式**：`make package` → `make ansible-deploy [HOST=<node> | HOSTS='<node1> <node2>']`，走 `ansible/` 下的 playbook，遠端目標路徑 `/home/user/HiBA/`
+- **文件完整度高，已抽查與原始碼一致**：`docs/HANDOVER.md`（交接文件：架構圖、模組表、測試分類、FAQ）、`docs/BLOCKCHAIN.md`（合約設計、Java 服務分層、設計模式）、`docs/NETTY_PIPELINE.md`（Pipeline 設計、GSLAB 協定格式）——已核對 `hiba-core/src/main/java/org/gslab/` 套件目錄（configuration / fileProtection / handlers / mService / sdns / tpm 等）與文件描述相符
+
+### 與本 repo 的關係（已確認）
+本 repo（HiBA-AB）是在 `C:\Users\gslab\Desktop\hiba`（Java HiBA 正式版：Broker、TPM 簽章、區塊鏈檔案完整性）**的基礎上**，加入 **LLM 智慧任務分派**與**統一 Dashboard 整合**的擴充層：
+- Java HiBA 提供底層 Broker 拓樸、節點間 Netty 通訊、TPM 硬體信任鏈、區塊鏈完整性驗證
+- 本 repo 的 `hiba-agent`（NLPlanningService + OrchestratorRunner）在其上疊加「自然語言 → ExecutionPlan → 派工」的智慧層，`claw-dashboard.html` 則是操作員的統一操作介面
+- 兩邊目前技術棧不同（Java Netty node vs. 本 repo 的 Pi HTTP sub-web node），實際整合程度／介接點仍待後續開發釐清，但方向已確定為上述擴充關係
+
+### 節點網路範圍
+執行 node 的目標機器分兩批，兩者都是有效派工對象：
+- `192.168.x.x`（如 `192.168.200.23`、`192.168.50.x`）：**本機／區網 VM**，在 gslab 這台 PC 所在的區網內
+- `163.18.x.x`（如 `163.18.49.35`，走 port-forwarding 到各 VM）：**其他實體機器上的 VM**，對應 `Desktop\hiba` 文件裡 PVE 平台的 11 台測試節點
+
+`.claude/settings.local.json` 目前只收斂到 `192.168.200.23`；若之後要透過 Claude 操作 `163.18.x` 這批節點，需要再另外新增對應的 ssh 權限。
