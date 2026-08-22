@@ -6,19 +6,65 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 專案狀態
 
-
+開發中。目前分支 `fix/scripts-tab-drawer-schema-compat` 聚焦於 Claw Dashboard 的任務鏈（Workflow）UI 重構（拖曳式節點編排、缺漏欄位提示、LLM 執行結果摘要）與 OrchestratorRunner 的節點斷線重連 / failover 邏輯。上一版已合併：`orchestrator.deployServer` 更名為 `orchestrator.updateSubWebRuntime`（語意修正：僅本機安裝/更新，非跨節點 SSH 部署）。
 
 ## 專案背景與技術定義 (Project & Tech Stack)
 
+HiBA-AB：工廠產線 Agent 任務編排系統（研究專案，見 `HiBA-AB_研究構想說明書*.md`）。核心概念是讓 LLM 將自然語言任務轉譯為可驗證的 ExecutionPlan，再由 Orchestrator 分派到本機或遠端 Raspberry Pi 節點執行 Python 工具腳本，並將每一步寫入稽核鏈（AuditTrail）。
 
+技術棧：
+- **hiba-agent（伺服器端）**：TypeScript（CommonJS）+ Node.js 原生 `http`（無 Express）、Zod 做 schema 驗證與型別推導、better-sqlite3 做稽核／信任登錄／工作流持久化、Jest + ts-jest 測試。
+- **Pi 節點端（scripts_pi/deploy_http）**：Node.js + Express.js（`sub_web_server.js`）、Python 3 工具腳本、better-sqlite3 稽核落地、TPM/swtpm 做硬體信任（選用）。
+- **Dashboard（scripts_pi/claw-dashboard.html）**：純 HTML/CSS/Vanilla JS 單檔案，無建置流程，直接以瀏覽器開啟。
+- **模型訓練（hiba-core/training）**：Python，LoRA 微調 pipeline，輸出 GGUF／Ollama Modelfile 供本機 LLM（`hiba-planner`）使用。
 
 ## 架構總覽 (Architecture)
 
+```
+Claw Dashboard (claw-dashboard.html)
+        │  NL 任務 / 手動操作
+        ▼
+hiba-agent AgentServer (HTTP API)
+  ├─ NLPlanningService  ── 呼叫 LLM 產生 ExecutionPlan / 執行結果摘要
+  ├─ OrchestratorRunner ── 拓樸排序 → 逐層派工，含逾時重連與跨節點 failover
+  │      ├─ local  → HiBAToolbox（本機 ToolRegistry）
+  │      └─ remote → Pi 節點 /api/execute（或相容 /execute，見 piCompatDispatch）
+  ├─ WorkflowStore      ── 持久化工作流：planned → approved → run
+  ├─ AuditTrail (SQLite)── 每一步事件記錄 + 區塊鏈錨定（batchUploadToChain）
+  └─ TrustRegistry       ── 節點信任登錄
 
+Accounting Server (hiba-core/tools/accounting-server.mjs)
+  └─ 維護線上節點清單 / 各節點可執行工具清單，供 Orchestrator 動態探索節點與 Dashboard 顯示
+
+Raspberry Pi Sub-Web 節點 (scripts_pi/deploy_http)
+  └─ sub_web_server.js 暴露 /execute /health /scripts /deploy /cmd，執行 manifest.json 登錄的 Python 腳本
+```
+
+`hiba.tools.ts`（TS 端工具定義／Zod schema）與 `manifest.json`（Pi 節點端工具登錄，root 與 `deploy_http/scripts/` 各一份，需同步）必須保持 I/O 契約一致，這是 Data-First 原則在本專案的具體落地。
 
 ## 常用指令 (Commands)
 
+```bash
+# hiba-core（根套件）
+cd hiba-core
+npm run typecheck        # tsc --noEmit
+npm test                 # node --test（hiba.toolbox / hiba.audit.sqlite）
+npm run accounting       # 啟動 Accounting Server（預設 :9090）
+npm run tools:check      # 檢查工具 manifest 是否同步
 
+# hiba-agent（Orchestrator / AgentServer）
+cd hiba-core/packages/hiba-agent
+npm run start:env        # 讀取 .env 啟動（預設 :8090）
+npm test                 # jest --runInBand
+npm run typecheck
+
+# Raspberry Pi 節點（首次安裝）
+sudo bash scripts_pi/deploy_http/00_setup.sh [NODE_ID] [CLAW_URL]
+curl http://localhost:3000/health
+
+# Dashboard
+# 直接以瀏覽器開啟 scripts_pi/claw-dashboard.html（無需建置）
+```
 
 ## 核心協作原則 (Core Collaboration Principles)
 
@@ -38,7 +84,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 安全基準線 (Security Baseline)
 
-
+- **機密不入庫**：密碼、API Key、Token 一律不寫入版本控制。只有 `.env.example`（佔位值）可提交，真實 `.env` 必須被 `.gitignore` 排除。
+- **舊有機密需主動清理**：若機密已被 git 追蹤，加入 `.gitignore` 不會使其停止被追蹤，須另外 `git rm --cached` 並視情況輪替該機密（見下方審查發現）。
+- **外部輸入一律驗證**：Pi 節點回傳、LLM 產出的 JSON、使用者輸入，都必須經 Zod schema 驗證（`validateRemoteResult` / `executionPlanSchema` 等），不得信任未經驗證的資料結構。
+- **DOM 輸出必須逃逸**：Dashboard 任何插入 DOM 的動態內容（腳本輸出、LLM 摘要、錯誤訊息）需呼叫 `escapeHtml()`，避免反射型 XSS。
+- **shell 權限最小化**：`.claude/settings.local.json` 的 Bash allowlist 應避免大範圍萬用字元（如 `ssh *`）與讀取 SSH 私鑰目錄，需要時應限定到具體 host / 具體指令。
+- **TPM／簽章金鑰不入庫**：`ek_fingerprint.txt` 等節點信任金鑰檔案僅存在於節點本機 `/opt/hiba/tpm/`，不得提交。
 
 ## 功能開發分支流程 (Feature Branch Workflow)
 
@@ -87,3 +138,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **單元測試**：遵循 FIRST（Fast、Independent、Repeatable、Self-validating、Timely）；每個測試一個概念。
 - **類別**：簡短、單一職責、高內聚低耦合、對擴展開放對修改封閉。
 - **重構**：童軍規則——讓程式碼比接手時更乾淨；小步重構配合測試保護。
+
+
+## obsidian 筆記位址
+- C:\Users\gslab\Desktop\HiBA-AB-Vault\HiBA-AB-Vault，所有相關紀錄，或是關鍵字可寫入此份筆記內
