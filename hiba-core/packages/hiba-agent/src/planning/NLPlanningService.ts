@@ -93,8 +93,16 @@ export class NLPlanningService {
     ]);
     const registeredTools = this.options.toolbox?.list() ?? [];
     const tools = registeredTools.map(toToolSpec);
+    const isPlannerVisible = (resource: ResourceItem) => resource.metadata?.['plannerVisible'] !== false;
+    const planningResources = Object.fromEntries(
+      Object.entries(resources).map(([nodeId, items]) => [nodeId, items.filter(isPlannerVisible)]),
+    );
+    const planningNodes = nodes.map(node => ({
+      ...node,
+      resources: node.resources.filter(isPlannerVisible),
+    }));
 
-    const { rawJson } = await this.llm.complete({ task, resources, nodes, tools });
+    const { rawJson } = await this.llm.complete({ task, resources: planningResources, nodes: planningNodes, tools });
     let plan = this.parsePlan(rawJson);
     if (this.options.toolbox && !plan.error) {
       const toolMap = new Map(registeredTools.map(tool => [tool.name, tool]));

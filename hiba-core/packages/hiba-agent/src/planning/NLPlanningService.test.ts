@@ -69,10 +69,13 @@ function makeLLM(rawJson: unknown): jest.Mocked<LLMClient> {
 }
 
 function makeAccounting(resources: NodeResourceMap = mockResources): jest.Mocked<AccountingClient> {
+  const nodes = Object.entries(resources).map(([nodeId, nodeResources]) => ({
+    ...mockNodes[0]!, nodeId, agentUrl: `http://${nodeId}`, resources: nodeResources,
+  }));
   return {
     listNodeResources: jest.fn<AccountingClient['listNodeResources']>().mockResolvedValue(resources),
     getNodeResources:  jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
-    listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(mockNodes),
+    listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(nodes),
   };
 }
 
@@ -232,6 +235,23 @@ describe('NLPlanningService', () => {
 
     expect(plan.steps[1]!.dependsOn).toEqual(['S1']);
     expect(plan.steps[1]!.input).toEqual({ filePath: '/tmp/second.xml' });
+  });
+
+  it('hides meta-tools marked plannerVisible=false from LLM planning context', async () => {
+    const visible = mockResources.node1![0]!;
+    const hidden = {
+      name: 'orchestrator.createTaskChain', type: 'tool', version: '1.0.0',
+      metadata: { plannerVisible: false },
+    };
+    const llm = makeLLM(validPlanJson);
+    const svc = new NLPlanningService(llm, makeAccounting({ node1: [visible, hidden] }));
+
+    await svc.plan('test task', ctx);
+
+    expect(llm.complete).toHaveBeenCalledWith(expect.objectContaining({
+      resources: { node1: [visible] },
+      nodes: [expect.objectContaining({ resources: [visible] })],
+    }));
   });
 
   it('fills default version "1.0.0" when LLM omits it', async () => {

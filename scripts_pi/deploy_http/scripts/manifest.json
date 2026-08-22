@@ -766,5 +766,209 @@
         "TOOL_TIMEOUT"
       ]
     }
+  },
+  {
+    "scriptName": "machine.queryLog",
+    "renderHint": "table",
+    "protocolVersion": "1.0",
+    "name": "machine.queryLog",
+    "version": "1.0.0",
+    "metadataSchemaVersion": "1.0",
+    "description": "依機台與 ISO 8601 時間範圍查詢事件紀錄",
+    "tags": [
+      "machine",
+      "read"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "machineId": {
+          "type": "string",
+          "description": "機台 ID，如 CNC-01"
+        },
+        "startTime": {
+          "type": "string",
+          "description": "含時區的查詢起始時間，ISO 8601"
+        },
+        "endTime": {
+          "type": "string",
+          "description": "含時區的查詢結束時間，ISO 8601"
+        },
+        "limit": {
+          "type": "number",
+          "description": "最多回傳 1 到 1000 筆，預設 100"
+        }
+      },
+      "required": [
+        "machineId",
+        "startTime",
+        "endTime"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean",
+          "description": "Log 查詢是否成功"
+        },
+        "machineId": {
+          "type": "string",
+          "description": "查詢的機台 ID"
+        },
+        "startTime": {
+          "type": "string",
+          "description": "實際查詢起始時間"
+        },
+        "endTime": {
+          "type": "string",
+          "description": "實際查詢結束時間"
+        },
+        "count": {
+          "type": "number",
+          "description": "符合條件的 Log 筆數"
+        },
+        "logs": {
+          "type": "array",
+          "description": "事件陣列；每筆可能包含 timestamp、machineId、event、orderId 與詳細內容"
+        },
+        "toolName": {
+          "type": "string",
+          "description": "正式 Tool 名稱，供稽核追蹤"
+        },
+        "domain": {
+          "type": "string",
+          "description": "工具所屬領域"
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "summaryHints": [
+      "說明機台與查詢時間範圍",
+      "說明 count",
+      "有 Log 時依時間順序整理事件，沒有時明確寫成沒有符合紀錄"
+    ],
+    "permissions": [
+      "machine.read"
+    ],
+    "timeoutMs": 10000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    }
+  },
+  {
+    "scriptName": "orchestrator.createTaskChain",
+    "renderHint": "table",
+    "protocolVersion": "1.0",
+    "name": "orchestrator.createTaskChain",
+    "version": "1.0.0",
+    "metadataSchemaVersion": "1.0",
+    "description": "由 LLM 為兩個以上 Node 建立任務鏈，並可選擇核准後執行",
+    "tags": [
+      "orchestrator",
+      "write"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task": {
+          "type": "string",
+          "description": "自然語言任務"
+        },
+        "nodeIds": {
+          "type": "array",
+          "description": "至少兩個不重複的 Node ID"
+        },
+        "autoRun": {
+          "type": "boolean",
+          "description": "是否自動核准並執行，預設 false"
+        },
+        "approvedBy": {
+          "type": "string",
+          "description": "autoRun=true 時的核准者"
+        }
+      },
+      "required": [
+        "task",
+        "nodeIds"
+      ],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean",
+          "description": "建立或執行是否成功"
+        },
+        "workflowId": {
+          "type": "string",
+          "description": "建立的 Workflow ID"
+        },
+        "status": {
+          "type": "string",
+          "description": "Workflow 狀態"
+        },
+        "plan": {
+          "type": "object",
+          "description": "LLM 產生並正規化後的任務鏈"
+        },
+        "selectedNodeIds": {
+          "type": "array",
+          "description": "使用者指定的 Node 順序"
+        },
+        "llmGenerated": {
+          "type": "boolean",
+          "description": "是否由 LLM 產生"
+        },
+        "approval": {
+          "type": "object",
+          "description": "autoRun 時的核准結果"
+        },
+        "execution": {
+          "type": "object",
+          "description": "autoRun 時的任務鏈執行結果"
+        },
+        "toolName": {
+          "type": "string",
+          "description": "正式 Tool 名稱，供稽核追蹤"
+        },
+        "domain": {
+          "type": "string",
+          "description": "工具所屬領域"
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "summaryHints": [
+      "說明 workflowId、狀態與 Node 順序",
+      "逐步整理 plan",
+      "autoRun 時整理 approval 與 execution；未執行時不得宣稱已完成"
+    ],
+    "permissions": [
+      "orchestrator.write"
+    ],
+    "timeoutMs": 90000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    },
+    "plannerVisible": false
   }
 ]
