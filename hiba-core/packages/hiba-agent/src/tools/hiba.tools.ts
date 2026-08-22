@@ -678,11 +678,11 @@ const orchestratorEchoRtt = defineTool({
   handler: notImplemented,
 });
 
-const orchestratorDeployServer = defineTool({
-  name: 'orchestrator.deployServer',
+const orchestratorUpdateSubWebRuntime = defineTool({
+  name: 'orchestrator.updateSubWebRuntime',
   version: '1.0.0',
   tags: ['orchestrator', 'write'],
-  description: '在新節點安裝或更新 Pi Sub-Web 伺服器',
+  description: '在目前節點本機安裝或更新 Sub-Web runtime；不會透過 SSH 部署其他節點',
   inputSchema: z.object({
     hibaRoot: z.string().optional().describe('安裝根目錄，預設 /opt/hiba'),
     nodeId:   z.string().optional().describe('節點 ID，預設 m1'),
@@ -785,7 +785,7 @@ export const allHibaTools = [
   machineExecuteOrder,
   envReadSensor,
   orchestratorEchoRtt,
-  orchestratorDeployServer,
+  orchestratorUpdateSubWebRuntime,
   materialReadAttachment,
   orchestratorListAgents,
 ];

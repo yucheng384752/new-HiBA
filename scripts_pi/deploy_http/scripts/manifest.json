@@ -588,12 +588,12 @@
     ]
   },
   {
-    "scriptName": "system.deployServer",
+    "scriptName": "system.updateSubWebRuntime",
     "renderHint": "table",
     "protocolVersion": "1.0",
-    "name": "orchestrator.deployServer",
+    "name": "orchestrator.updateSubWebRuntime",
     "version": "1.0.0",
-    "description": "在新節點安裝或更新 Pi Sub-Web 伺服器",
+    "description": "在目前節點本機安裝或更新 Sub-Web runtime，不透過 SSH 部署其他節點",
     "tags": [
       "orchestrator",
       "write"
@@ -607,13 +607,14 @@
         },
         "nodeId": {
           "type": "string",
-          "description": "節點 ID，預設 m1"
+          "description": "要寫入設定的 Node ID"
         },
         "clawUrl": {
           "type": "string",
           "description": "Claw 主控端 URL"
         }
       },
+      "required": [],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
@@ -621,37 +622,138 @@
       "type": "object",
       "properties": {
         "success": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "部署是否成功"
         },
         "steps": {
           "type": "array",
-          "items": {}
+          "description": "各部署步驟結果"
         },
         "warnings": {
           "type": "array",
-          "items": {}
+          "description": "非致命警告；空陣列表示沒有警告"
         },
         "serverPath": {
-          "type": "string"
+          "type": "string",
+          "description": "Sub-Web server 安裝路徑"
         },
         "scriptsDir": {
-          "type": "string"
+          "type": "string",
+          "description": "腳本目錄"
         },
         "dataDir": {
-          "type": "string"
+          "type": "string",
+          "description": "資料目錄"
+        },
+        "toolName": {
+          "type": "string",
+          "description": "正式 Tool 名稱，供稽核追蹤"
+        },
+        "domain": {
+          "type": "string",
+          "description": "工具所屬領域"
         }
       },
-      "required": [
-        "success",
-        "steps",
-        "warnings",
-        "serverPath",
-        "scriptsDir",
-        "dataDir"
-      ],
+      "required": [],
       "additionalProperties": false,
       "$schema": "http://json-schema.org/draft-07/schema#"
     },
+    "permissions": [
+      "orchestrator.write"
+    ],
+    "timeoutMs": 180000,
+    "retryPolicy": {
+      "maxAttempts": 3,
+      "initialDelayMs": 500,
+      "backoffMultiplier": 2,
+      "retryOn": [
+        "TOOL_TIMEOUT"
+      ]
+    },
+    "metadataSchemaVersion": "1.0",
+    "summaryHints": [
+      "說明部署成功或失敗",
+      "逐項整理 steps 與 warnings",
+      "說明 serverPath、scriptsDir 與 dataDir"
+    ]
+  },
+  {
+    "scriptName": "system.updateSubWebRuntime",
+    "renderHint": "table",
+    "protocolVersion": "1.0",
+    "name": "orchestrator.deployServer",
+    "version": "1.0.0",
+    "metadataSchemaVersion": "1.0",
+    "description": "在目前節點部署或更新 Sub-Web runtime 並回傳安裝結果",
+    "tags": [
+      "orchestrator",
+      "write"
+    ],
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "hibaRoot": {
+          "type": "string",
+          "description": "安裝根目錄，預設 /opt/hiba"
+        },
+        "nodeId": {
+          "type": "string",
+          "description": "要寫入設定的 Node ID"
+        },
+        "clawUrl": {
+          "type": "string",
+          "description": "Claw 主控端 URL"
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "outputSchema": {
+      "type": "object",
+      "properties": {
+        "success": {
+          "type": "boolean",
+          "description": "部署是否成功"
+        },
+        "steps": {
+          "type": "array",
+          "description": "各部署步驟結果"
+        },
+        "warnings": {
+          "type": "array",
+          "description": "非致命警告；空陣列表示沒有警告"
+        },
+        "serverPath": {
+          "type": "string",
+          "description": "Sub-Web server 安裝路徑"
+        },
+        "scriptsDir": {
+          "type": "string",
+          "description": "腳本目錄"
+        },
+        "dataDir": {
+          "type": "string",
+          "description": "資料目錄"
+        },
+        "toolName": {
+          "type": "string",
+          "description": "正式 Tool 名稱，供稽核追蹤"
+        },
+        "domain": {
+          "type": "string",
+          "description": "工具所屬領域"
+        }
+      },
+      "required": [],
+      "additionalProperties": false,
+      "$schema": "http://json-schema.org/draft-07/schema#"
+    },
+    "summaryHints": [
+      "說明部署成功或失敗",
+      "逐項整理 steps 與 warnings",
+      "說明 serverPath、scriptsDir 與 dataDir"
+    ],
     "permissions": [
       "orchestrator.write"
     ],
