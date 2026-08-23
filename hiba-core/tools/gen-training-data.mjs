@@ -9,6 +9,12 @@ const DEFAULT_OUT_DIR = 'training/data';
 const string = { type: 'string' };
 const number = { type: 'number' };
 const boolean = { type: 'boolean' };
+const timeRangeProp = {
+  type: 'object',
+  properties: { from: string, to: string },
+  required: ['from', 'to'],
+  additionalProperties: false,
+};
 
 function tool(name, description, properties, required = [], action = 'read') {
   const domain = name.split('.')[0];
@@ -46,6 +52,9 @@ const TOOLS = [
   tool('material.protectFile', '保護檔案並建立稽核紀錄', { filePath: string, keepFile: boolean }, ['filePath'], 'write'),
   tool('material.verifyFile', '驗證檔案完整性', { filePath: string }, ['filePath']),
   tool('orchestrator.echoRtt', '測試節點往返延遲', { message: string, sentAt: string }),
+  tool('machine.calculateOee', '計算指定時間區間的 OEE（稼動率 × 效能率 × 良品率）', { machineId: string, timeRange: timeRangeProp }, ['machineId', 'timeRange']),
+  tool('machine.listAlarms', '查詢指定時間區間內的機台警報記錄', { machineId: string, timeRange: timeRangeProp }, ['machineId', 'timeRange']),
+  tool('orchestrator.getAuditSummary', '取得指定時間區間的 AuditTrail 摘要統計', { timeRange: timeRangeProp }, ['timeRange']),
 ];
 
 const VALUES = {
@@ -57,6 +66,13 @@ const VALUES = {
   employees: ['E1007', 'E2031', 'E4410', 'E5502'],
   skills: ['CNC-L2', 'QC-AOI', 'FORKLIFT', 'PACK-L1'],
   files: ['/data/report.csv', '/data/batch.json', '/var/lib/hiba/audit.log', '/srv/share/result.pdf'],
+  // 皆為指令內文明講的絕對區間，訓練目標是「照抄成 from/to」，不要求模型自行推算「現在」
+  timeRanges: [
+    { from: '2026-08-20T00:00:00Z', to: '2026-08-21T00:00:00Z' },
+    { from: '2026-08-15T08:00:00Z', to: '2026-08-15T20:00:00Z' },
+    { from: '2026-07-01T00:00:00Z', to: '2026-07-31T23:59:59Z' },
+    { from: '2026-08-22T09:00:00Z', to: '2026-08-23T09:00:00Z' },
+  ],
 };
 
 const pick = (items, i) => items[i % items.length];
@@ -121,6 +137,39 @@ const SCENARIOS = [
   i => ({
     task: `對新節點送出 ${value(['hello', 'health-check', 'pairing-test', 'ready'], i)} 以測試往返延遲`,
     steps: [step('S1', 'orchestrator.echoRtt', { message: value(['hello', 'health-check', 'pairing-test', 'ready'], i) })],
+  }),
+  // 結構化輸入（timeRange）：指令內文明講絕對時間，訓練 from/to 欄位名稱與 ISO 8601 格式
+  i => ({
+    task: `計算機台 ${value(VALUES.machines, i)} 從 ${pick(VALUES.timeRanges, i).from} 到 ${pick(VALUES.timeRanges, i).to} 的 OEE`,
+    steps: [step('S1', 'machine.calculateOee', { machineId: value(VALUES.machines, i), timeRange: pick(VALUES.timeRanges, i) })],
+  }),
+  i => ({
+    task: `查詢機台 ${value(VALUES.machines, i)} 從 ${pick(VALUES.timeRanges, i).from} 到 ${pick(VALUES.timeRanges, i).to} 的警報記錄`,
+    steps: [step('S1', 'machine.listAlarms', { machineId: value(VALUES.machines, i), timeRange: pick(VALUES.timeRanges, i) })],
+  }),
+  i => ({
+    task: `取得從 ${pick(VALUES.timeRanges, i).from} 到 ${pick(VALUES.timeRanges, i).to} 的稽核執行摘要`,
+    steps: [step('S1', 'orchestrator.getAuditSummary', { timeRange: pick(VALUES.timeRanges, i) })],
+  }),
+  // 複合任務：3 步以上依賴鏈，其一併用 timeRange 讓兩種訓練目標疊加
+  i => ({
+    task: `先查詢機台 ${value(VALUES.machines, i)} 狀態，確認可用後執行工單 ${value(VALUES.orders, i)}，完成後計算該機台從 ${pick(VALUES.timeRanges, i).from} 到 ${pick(VALUES.timeRanges, i).to} 的 OEE`,
+    steps: [
+      step('S1', 'machine.queryStatus', { machineId: value(VALUES.machines, i) }),
+      step('S2', 'machine.executeOrder', { orderId: value(VALUES.orders, i) }, ['S1']),
+      step('S3', 'machine.calculateOee', { machineId: value(VALUES.machines, i), timeRange: pick(VALUES.timeRanges, i) }, ['S2']),
+    ],
+  }),
+  i => ({
+    task: `讀取感測器 ${value(VALUES.sensors, i)}，設定最高門檻 ${25 + (i % 8)} 度並通知 ops，再取得從 ${pick(VALUES.timeRanges, i).from} 到 ${pick(VALUES.timeRanges, i).to} 的稽核執行摘要`,
+    steps: [
+      step('S1', 'env.readSensor', { sensorId: value(VALUES.sensors, i) }),
+      step('S2', 'env.alertThreshold', {
+        sensorId: value(VALUES.sensors, i),
+        thresholdConfig: { max: 25 + (i % 8), alertChannel: 'ops' },
+      }, ['S1']),
+      step('S3', 'orchestrator.getAuditSummary', { timeRange: pick(VALUES.timeRanges, i) }, ['S2']),
+    ],
   }),
 ];
 
