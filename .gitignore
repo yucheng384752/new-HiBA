@@ -8,6 +8,7 @@ __pycache__/
 *.pyc
 *.pyo
 .env
+.env.local
 
 # Editor / OS
 .DS_Store
