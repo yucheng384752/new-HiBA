@@ -130,8 +130,64 @@ function extractText(data: Record<string, unknown>, format: 'openai' | 'ollama')
 function tryParseJson(text: string): unknown {
   try { return JSON.parse(text); } catch { /* try extracting code fence */ }
   const m = /```(?:json)?\s*([\s\S]+?)\s*```/.exec(text);
+  const candidate = m?.[1] ?? text;
   if (m?.[1]) { try { return JSON.parse(m[1]); } catch { /* fall through */ } }
+  const repaired = repairBracketBalance(candidate);
+  if (repaired !== candidate) {
+    try { return JSON.parse(repaired); } catch { /* fall through */ }
+  }
   return text;
+}
+
+/**
+ * Mechanically repairs the two malformed-JSON patterns observed from
+ * hiba-planner under the full production prompt: a step object missing its
+ * closing `}` before the enclosing `]`/`}`, and a stray `)` used where a
+ * `}` was meant (valid JSON never contains a bare parenthesis outside a
+ * string value, so any `)` seen outside a string is always a mistake here).
+ *
+ * Tracks a stack of the closer each open `{`/`[` expects. A `}` or `]` that
+ * doesn't match the current top first pops and emits whatever closer(s) are
+ * actually pending (repairing a missing closer), then consumes the matching
+ * one; a `)` always closes exactly one pending scope. Never touches string
+ * content, and is a no-op on already-balanced JSON, so callers can attempt
+ * it unconditionally.
+ */
+export function repairBracketBalance(text: string): string {
+  const stack: Array<'}' | ']'> = [];
+  let out = '';
+  let inString = false;
+  let escaped = false;
+
+  for (const ch of text) {
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+
+    if (ch === '"') { inString = true; out += ch; continue; }
+    if (ch === '{') { stack.push('}'); out += ch; continue; }
+    if (ch === '[') { stack.push(']'); out += ch; continue; }
+
+    if (ch === '}' || ch === ']') {
+      while (stack.length > 0 && stack[stack.length - 1] !== ch) out += stack.pop();
+      out += stack.length > 0 ? stack.pop()! : ch;
+      continue;
+    }
+
+    if (ch === ')') {
+      if (stack.length > 0) out += stack.pop();
+      continue; // a stray ')' with nothing open left to close is dropped
+    }
+
+    out += ch;
+  }
+
+  while (stack.length > 0) out += stack.pop();
+  return out;
 }
 
 function buildDefaultSystemPrompt(
