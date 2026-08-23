@@ -1,5 +1,7 @@
 # 補齊 HiBA（Java，`C:\Users\gslab\Desktop\hiba`）區塊鏈整合所需資料
 
+> **更正（2026-08-23，同日）**：使用者明確表示 `C:\Users\gslab\Desktop\hiba` 這個資料夾不可做更動，之後所有工作只能在 `C:\Users\gslab\Desktop\files`（本 repo，含它自己獨立的 TypeScript `hiba-core`，跟 `Desktop\hiba` 的 Java `hiba-core`是兩回事）內進行。原本推上 `socomni/hiba` `dev` 分支的 3 個 commit（`.gitignore` 補洞、`run-with-blockchain-env.sh`、PATH fallback 修正）已用 `git revert` 撤銷並重新 push（`701bc28..ee61ee6`，用 revert 而非改寫歷史，因為是共用分支）；本機的 `hiba-core/.env.local` 與跑測試時產生的所有殘留檔案（`auth_ch`、`device/`、`logs/`、`receiveFile/`、`request/`、`blockchain_file_protect.db*`）也已清除，working tree 已核對回到本次工作開始前的原始狀態。**下方內容保留作為歷史記錄，但 Sepolia 部署／驗證這件事本身已不再由本 repo 的工作流程去接續處理 `Desktop\hiba` 那一側的整合。**
+
 ## Context
 
 `CLAUDE.md` 深度掃描摘要已核實：`hiba-core/env.json` 裡 `BlockchainFileProtect.contractAddress`／`.privateKey`、`BlockchainTPMRegistry.contractAddress`／`.privateKey` 目前皆為空字串，即便 `HiBANetwork.BlockchainFileProtect` 開關已是 `true`。這篇記錄回答「要接上區塊鏈還缺什麼」，只做盤點，沒有實際部署（部署需要 `forge`/`anvil` 或 Sepolia 帳號，屬於使用者要執行的步驟）。
