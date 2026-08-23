@@ -53,5 +53,21 @@
 
 - 私鑰不可入庫（`docs/BLOCKCHAIN.md` 已明確警告）——已處理，見上方部署結果段落。
 - 這批工作在 `Desktop\hiba`（獨立 git repo，Java/Maven），跟本 repo（HiBA-AB）技術棧不同、也不共用 git 歷史。
-- 已補上 `run-with-blockchain-env.sh`（commit `14f29b7`，`Desktop\hiba` 根目錄）：載入 `.env.local` 進程序環境、必要時跑 `make package`、再啟動 `output/hiba-core-*.jar`；並且會檢查 `.env.local` 是否意外被 git 追蹤，追蹤到就直接拒絕執行。只驗證過 `--print-env`（安全、不啟動任何服務）；沒有實際跑過完整啟動，因為 `AutoTrackStarter` 會開網路服務（multicast 等），這部分留給使用者自己手動執行確認。
+- 已補上 `run-with-blockchain-env.sh`（commit `14f29b7`，`Desktop\hiba` 根目錄）：載入 `.env.local` 進程序環境、必要時跑 `make package`、再啟動 `output/hiba-core-*.jar`；並且會檢查 `.env.local` 是否意外被 git 追蹤，追蹤到就直接拒絕執行。
+
+## 端對端驗證（2026-08-23，同日完成）
+
+這台機器原本沒裝 JDK／Maven（`Get-Command java`／`mvn` 在 Bash 跟 PowerShell 都找不到），已補上：
+- JDK 21（Eclipse Temurin，`winget install EclipseAdoptium.Temurin.21.JDK`，裝在系統預設路徑 `C:\Program Files\Eclipse Adoptium\jdk-21.0.12.101-hotspot`）
+- Maven 3.9.16（winget 沒有官方套件，改用 Apache 官方 zip 手動解壓到 `C:\Users\gslab\tools\apache-maven-3.9.16`）
+
+`run-with-blockchain-env.sh` 更新為：找不到 `java`/`mvn` 在 PATH 上時，自動 fallback 去上述路徑找（因為新裝的工具不會立刻反映在既有 shell session 的 PATH 裡）。
+
+實際跑了一次 `./run-with-blockchain-env.sh`（`AutoTrackStarter` 完整開機，非只是查設定），log 確認：
+- `Web3jBlockchainServiceImpl` 成功連上 Sepolia（`Connected to network: 11155111`），讀到的 `Contract address`／`Account address` 跟 `.env.local` 一致，不是 `env.json` 的空字串。
+- `TPMDeviceRegistryConfig` 印出的 Blockchain Configuration 區塊同樣讀到正確的 RPC／合約地址／Chain ID；私鑰在 log 裡只顯示前 6 碼（`a5a24a***`），沒有外洩。
+- `TPMService`（原本擔心因為沒有實體 TPM/swtpm 而初始化失敗）意外地順利通過，"Shared TPMService instance initialized successfully"——看起來有軟體 fallback，不用額外處理。
+- `HiBAHttpRequestServer` 正常在 8092 啟動；唯一噴出的例外是 `lscpu: command not found`（CPU 效能評測嘗試呼叫 Linux 專用指令，Windows 上不存在），跟區塊鏈無關、不影響其他服務，屬於既有小毛病，不在這次範圍內處理。
+
+驗證完成後已手動 `kill` 掉這個 process（會佔用本機 8092 port 並寫入 `hiba-core/blockchain_file_protect.db`，純粹是這次驗證用，沒必要留著跑）。
 - 部署用的錢包餘額還有 8 ETH 測試幣，之後若要棄用這把私鑰，記得先把餘額轉走。
