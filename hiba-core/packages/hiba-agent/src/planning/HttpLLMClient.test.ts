@@ -93,3 +93,54 @@ describe('HttpLLMClient system prompt', () => {
     expect(systemPrompt.length / 4).toBeLessThan(3500);
   });
 });
+
+// ── HttpLLMClient malformed-JSON retry ──────────────────────────────────────
+// Regression coverage: hiba-planner occasionally emits syntactically broken
+// JSON (observed: a step's `input` object missing its closing brace before
+// the enclosing `]`). JSON.parse and the fenced-code-block fallback both fail
+// in that case, so complete() must retry once with the bad output shown back
+// to the model, instead of silently handing the raw string downstream.
+
+describe('HttpLLMClient malformed-JSON retry', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const payload: LLMPayload = { task: 'do something', resources: {}, nodes: [], tools: [] };
+
+  it('retries once and returns the parsed object when the retry is valid JSON', async () => {
+    const calls: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string);
+      calls.push(body);
+      const content = calls.length === 1
+        ? '{"steps":[{"stepId":"S1","toolName":"a.b","nodeId":"n1","version":"1.0.0","input":{"x":1}]' // broken: missing }
+        : '{"steps":[]}';
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+    });
+
+    const client = new HttpLLMClient('http://localhost:11434/v1/chat/completions', { format: 'openai' });
+    const { rawJson } = await client.complete(payload);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant' }),
+      expect.objectContaining({ role: 'user', content: expect.stringContaining('not valid JSON') }),
+    ]));
+    expect(rawJson).toEqual({ steps: [] });
+  });
+
+  it('does not retry a second time — persistent malformed JSON returns the raw string once', async () => {
+    let callCount = 0;
+    jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      callCount += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'still not json{{{' } }] }));
+    });
+
+    const client = new HttpLLMClient('http://localhost:11434/v1/chat/completions', { format: 'openai' });
+    const { rawJson } = await client.complete(payload);
+
+    expect(callCount).toBe(2); // one retry attempt, then give up
+    expect(rawJson).toBe('still not json{{{');
+  });
+});

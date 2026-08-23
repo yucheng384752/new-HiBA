@@ -41,9 +41,27 @@ export class HttpLLMClient implements LLMClient {
           ? this.options.systemPromptTemplate(payload.resources, payload.nodes, payload.tools)
           : buildDefaultSystemPrompt(payload.resources, payload.nodes, payload.tools));
 
+    const first = await this.fetchAndParse(system, payload.task);
+    if (typeof first.parsed !== 'string') return { rawJson: first.parsed };
+
+    // hiba-planner occasionally emits syntactically broken JSON (mismatched
+    // braces/parens) that fails both JSON.parse and the fenced-code-block
+    // fallback in tryParseJson, which returns the raw string as-is. Handing
+    // that string downstream just produces a confusing "expected object,
+    // received string" validation error, so retry once with the bad output
+    // shown back to the model and an explicit correction request.
+    const retry = await this.fetchAndParse(system, payload.task, first.raw);
+    return { rawJson: retry.parsed };
+  }
+
+  private async fetchAndParse(
+    system: string,
+    task: string,
+    previousInvalidOutput?: string,
+  ): Promise<{ raw: string; parsed: unknown }> {
     const body = this.options.format === 'ollama'
-      ? this.ollamaBody(system, payload.task)
-      : this.openaiBody(system, payload.task);
+      ? this.ollamaBody(system, task, previousInvalidOutput)
+      : this.openaiBody(system, task, previousInvalidOutput);
 
     const res = await fetch(this.endpoint, {
       method: 'POST',
@@ -59,31 +77,45 @@ export class HttpLLMClient implements LLMClient {
 
     const data = await res.json() as Record<string, unknown>;
     const raw = extractText(data, this.options.format ?? 'openai');
-    return { rawJson: tryParseJson(raw) };
+    return { raw, parsed: tryParseJson(raw) };
   }
 
-  private openaiBody(system: string, task: string) {
+  private openaiBody(system: string, task: string, previousInvalidOutput?: string) {
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user',   content: task   },
+    ];
+    if (previousInvalidOutput !== undefined) {
+      messages.push(
+        { role: 'assistant', content: previousInvalidOutput },
+        { role: 'user',      content: JSON_CORRECTION_MESSAGE },
+      );
+    }
     return {
       model: this.options.model ?? 'hiba-planner',
-      messages: [
-        { role: 'system',  content: system },
-        { role: 'user',    content: task   },
-      ],
+      messages,
       response_format: { type: 'json_object' },
       temperature: this.options.temperature ?? 0.1,
     };
   }
 
-  private ollamaBody(system: string, task: string) {
+  private ollamaBody(system: string, task: string, previousInvalidOutput?: string) {
+    const prompt = previousInvalidOutput === undefined
+      ? `${system}\n\nUser task: ${task}`
+      : `${system}\n\nUser task: ${task}\n\nYour previous response:\n${previousInvalidOutput}\n\n${JSON_CORRECTION_MESSAGE}`;
     return {
       model:  this.options.model ?? 'hiba-planner',
-      prompt: `${system}\n\nUser task: ${task}`,
+      prompt,
       format: 'json',
       stream: false,
       options: { temperature: this.options.temperature ?? 0.1 },
     };
   }
 }
+
+const JSON_CORRECTION_MESSAGE = 'Your previous response was not valid JSON, or did not match the '
+  + 'required shape. Return ONLY a single valid JSON object matching the schema above — no markdown '
+  + 'wrapper, no commentary, and make sure every brace/bracket/parenthesis is correctly matched.';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 

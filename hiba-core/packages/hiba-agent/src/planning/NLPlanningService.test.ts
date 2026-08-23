@@ -148,6 +148,52 @@ describe('NLPlanningService', () => {
     ]);
   });
 
+  it('retries once with a correction when the LLM hallucinates a tool name not in the catalog', async () => {
+    const hallucinatedPlan = {
+      steps: [{
+        stepId: 'S1', toolName: 'material.doesNotExist', nodeId: 'node1',
+        version: '1.0.0', input: { filePath: '/opt/models/model.xml' }, dependsOn: [],
+      }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const llm = {
+      complete: jest.fn<LLMClient['complete']>()
+        .mockResolvedValueOnce({ rawJson: hallucinatedPlan })
+        .mockResolvedValueOnce({ rawJson: validPlanJson }),
+    };
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => [protectFileTool] },
+    });
+
+    const plan = await svc.plan('protect a file', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(2);
+    const secondCallTask = llm.complete.mock.calls[1]![0].task;
+    expect(secondCallTask).toContain('material.doesNotExist');
+    expect(plan.error).toBeUndefined();
+    expect(plan.steps).toEqual([expect.objectContaining({ toolName: 'material.protectFile' })]);
+  });
+
+  it('surfaces a validation error when the retry still hallucinates a tool name', async () => {
+    const hallucinatedPlan = {
+      steps: [{
+        stepId: 'S1', toolName: 'material.doesNotExist', nodeId: 'node1',
+        version: '1.0.0', input: { filePath: '/opt/models/model.xml' }, dependsOn: [],
+      }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const llm = makeLLM(hallucinatedPlan); // every call returns the same hallucinated plan
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => [protectFileTool] },
+    });
+
+    const plan = await svc.plan('protect a file', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(2); // one retry, then gives up
+    expect(plan.steps).toHaveLength(0);
+    expect(plan.error).toMatch(/Plan validation failed/);
+  });
+
   it('returns error plan when LLM output is not a valid ExecutionPlan shape', async () => {
     const svc = new NLPlanningService(makeLLM({ invalid: 'not a plan' }), makeAccounting());
 

@@ -145,32 +145,32 @@ export class NLPlanningService {
       resources: node.resources.filter(isPlannerVisible),
     }));
 
-    const { rawJson } = await this.llm.complete({ task, resources: planningResources, nodes: planningNodes, tools });
-    let plan = this.parsePlan(rawJson);
-    if (this.options.toolbox && !plan.error) {
-      const toolMap = new Map(registeredTools.map(tool => [tool.name, tool]));
-      plan = {
-        ...plan,
-        steps: plan.steps.map(step => {
-          const parsed = toolMap.get(step.toolName)?.inputSchema.safeParse(step.input);
-          return parsed?.success ? { ...step, input: parsed.data } : step;
-        }),
-      };
-      if (/(接續|依序|然後|再由|\bafter\b|\bthen\b)/i.test(task)
-          && plan.steps.length > 1
-          && plan.steps.every(step => step.dependsOn.length === 0)) {
-        plan = {
-          ...plan,
-          steps: plan.steps.map((step, index) => index === 0
-            ? step
-            : { ...step, dependsOn: [plan.steps[index - 1]!.stepId] }),
-        };
-      }
-    }
+    let plan = await this.generateNormalizedPlan(task, registeredTools, tools, planningResources, planningNodes);
     if (plan.error || !this.options.toolbox) return plan;
 
-    const validation = validatePlan(plan, { tools: registeredTools, nodes });
+    let validation = validatePlan(plan, { tools: registeredTools, nodes });
     if (validation.valid) return validation.plan;
+
+    // hiba-planner sometimes invents a plausible-sounding tool name that was
+    // never in the catalog (e.g. "env.readTemperature" instead of the
+    // registered "env.readSensor"), even though the system prompt explicitly
+    // forbids it. That's a distinct failure mode from "no online node can run
+    // this real tool" (AGENT_NOT_REGISTERED) — retry once, telling the model
+    // exactly which name(s) it hallucinated, before giving up.
+    const hallucinated = validation.issues
+      .filter(issue => issue.code === 'TOOL_NOT_FOUND')
+      .map(issue => issue.stepId && plan.steps.find(step => step.stepId === issue.stepId)?.toolName)
+      .filter((name): name is NonNullable<typeof name> => Boolean(name));
+    if (hallucinated.length > 0) {
+      const correctedTask = `${task}\n\n(Correction: your previous attempt used unregistered tool name(s) `
+        + `${[...new Set(hallucinated)].join(', ')}. They do not exist. Choose ONLY exact names from `
+        + `"Available Tools", verbatim.)`;
+      plan = await this.generateNormalizedPlan(correctedTask, registeredTools, tools, planningResources, planningNodes);
+      if (plan.error) return plan;
+      validation = validatePlan(plan, { tools: registeredTools, nodes });
+      if (validation.valid) return validation.plan;
+    }
+
     const canAskUser = validation.issues.every(issue => issue.code === 'INPUT_REQUIRED' || issue.code === 'INPUT_INVALID');
     if (canAskUser) {
       return {
@@ -186,6 +186,39 @@ export class NLPlanningService {
       validationIssues: validation.issues,
       missingInputs: validation.missingInputs,
     };
+  }
+
+  /** Calls the LLM once, parses its output, and applies input coercion / dependsOn inference. */
+  private async generateNormalizedPlan(
+    task: string,
+    registeredTools: RegisteredTool[],
+    tools: ToolSpec[],
+    planningResources: NodeResourceMap,
+    planningNodes: NodeDescriptor[],
+  ): Promise<ExecutionPlan> {
+    const { rawJson } = await this.llm.complete({ task, resources: planningResources, nodes: planningNodes, tools });
+    let plan = this.parsePlan(rawJson);
+    if (!this.options.toolbox || plan.error) return plan;
+
+    const toolMap = new Map(registeredTools.map(tool => [tool.name, tool]));
+    plan = {
+      ...plan,
+      steps: plan.steps.map(step => {
+        const parsed = toolMap.get(step.toolName)?.inputSchema.safeParse(step.input);
+        return parsed?.success ? { ...step, input: parsed.data } : step;
+      }),
+    };
+    if (/(接續|依序|然後|再由|\bafter\b|\bthen\b)/i.test(task)
+        && plan.steps.length > 1
+        && plan.steps.every(step => step.dependsOn.length === 0)) {
+      plan = {
+        ...plan,
+        steps: plan.steps.map((step, index) => index === 0
+          ? step
+          : { ...step, dependsOn: [plan.steps[index - 1]!.stepId] }),
+      };
+    }
+    return plan;
   }
 
   /** Expose resource map for AgentServer /api/resources proxy */
