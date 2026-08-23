@@ -61,8 +61,25 @@ Ollama，抓到模型的原始輸出：
 
 ## 待辦 / 後續選項（未擅自決定，留給使用者選）
 
-1. 加一層機械式的括號配平修復（不依賴模型自己改，直接用程式補齊漏掉的 `}`/`)`），仍屬程式碼層，
-   可能對這兩個案例真的有效，因為問題本質是語法而非語意。
+1. ~~加一層機械式的括號配平修復~~ ——**已完成，見下方「機械式括號配平修復」段落**。
 2. 從根本改善 `hiba-planner` 的訓練資料（`hiba-core/training`，LoRA pipeline），補上複合任務／
    結構化輸入（時間區間等）的訓練範例——這已經超出「程式碼防護」範圍，需要重新準備訓練資料並跑
    微調，不在這次分支處理。
+
+## 機械式括號配平修復（同日追加，commit `0cfa793`）
+
+新增 `repairBracketBalance()`（`HttpLLMClient.ts`），在 `tryParseJson()` 裡當 `JSON.parse` 與程式碼區塊
+擷取都失敗時，用一個 stack 追蹤每個 `{`/`[` 該對應的 closer，機械式修正兩種真實抓到的壞掉模式：
+少了一個 `}` 就補上、或是把不該出現在 JSON 語法位置的 `)`（一律視為打錯的 `}`/`]`）換成正確的
+closer。只處理字串字面值以外的結構符號，對已經合法的 JSON 是 no-op。
+
+用真實模型 + 真實 accounting server 重新對原本那兩個失敗任務跑過完整 `NLPlanningService.plan()`：
+**兩個任務的 JSON 都成功解析了**——`Plan parse failed: expected object, received string` 這個錯誤消失，
+換成 `validatePlan` 給出的具體錯誤（`No online node can execute 'env.readTemperature@1.0.0'`、
+`Invalid enum value...` 等）。也就是說：**機械式修復確實達成了它的目標**（修好語法），但兩個任務
+本身還是因為模型選錯工具名／編造不存在的 enum 值而驗證失敗——這是上面已經記錄的模型能力問題，
+不是這次修復的範圍，不會假裝已經解決。
+
+測試：新增 5 個 `repairBracketBalance` 案例（含兩筆真實抓到的壞字串原樣測試）+ 1 個「一次 HTTP call
+內就地修復、不用重試」的案例，並把原本假設「一定要重試」的測試改成用真的無法修復的內容（純文字，非
+JSON 形狀）。hiba-agent 全套 168/168 通過，`tsc --noEmit` 乾淨。
