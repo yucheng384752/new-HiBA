@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-system.deployServer.py — Sub-Web 伺服器自部署腳本
+system.updateSubWebRuntime.py — Sub-Web runtime 本機安裝／更新腳本
 將 sub_web_server.js 嵌入此 .py 內，單一檔案即可完成部署
 
 使用方式（兩種情境皆適用）：
 
   [新系統] 剛跑完 00_setup.sh，或尚未有 node 服務：
-    sudo python3 system.deployServer.py
+    sudo python3 system.updateSubWebRuntime.py
 
   [舊系統加裝] 透過 Dashboard → Deploy → Script 模式推送此檔，
-    再到 Scripts 分頁執行 system.deployServer（無需 sudo，
+    再到 Scripts 分頁執行 system.updateSubWebRuntime（無需 sudo，
     若 /opt/hiba 已由 pi 所有則有寫入權限）：
-    POST /execute { "scriptName": "system.deployServer", "params": {} }
+    POST /execute { "scriptName": "system.updateSubWebRuntime", "params": {} }
 
 輸入（選填）：
   { "hibaRoot": "/opt/hiba" }    ← 自訂安裝根目錄，預設 /opt/hiba
@@ -457,7 +457,7 @@ def main():
         "scriptsDir": scripts_dir,
         "dataDir":    data_dir,
         "nodeId":     node_id,
-        "toolName":   "orchestrator.deployServer",
+        "toolName":   "orchestrator.updateSubWebRuntime",
         "domain":     "orchestrator",
         "renderHint": "table",
     }, ensure_ascii=False))

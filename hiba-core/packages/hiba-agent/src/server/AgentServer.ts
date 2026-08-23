@@ -164,6 +164,7 @@ export interface AgentServerOptions {
  *   GET  /health           → { status, service }
  *   GET  /api/resources    → NodeResourceMap (proxied from AccountingClient)
  *   POST /api/plan         → ExecutionPlan
+ *   POST /api/summarize    → natural-language execution summary
  */
 export class AgentServer {
   private readonly server: http.Server;
@@ -480,6 +481,16 @@ export class AgentServer {
         } else {
           json(res, 200, plan);
         }
+        return;
+      }
+
+      if (method === 'POST' && urlPath === '/api/summarize') {
+        const body = (await readBody(req)) as { task?: string; run?: unknown };
+        if (!body.task?.trim() || body.run === undefined) {
+          jsonError(res, 400, 'REQUEST_INVALID', '"task" and "run" are required');
+          return;
+        }
+        json(res, 200, await this.planning.summarize(body.task.trim(), body.run));
         return;
       }
 

@@ -193,9 +193,12 @@ const machineQueryStatus = defineTool({
   description: '查詢機台當前運作狀態',
   inputSchema: z.object({ machineId: z.string().describe('機台 ID') }),
   outputSchema: z.object({
-    machineId:   z.string(),
-    status:      z.enum(['running', 'idle', 'alarm', 'maintenance']).describe('運作狀態'),
-    lastUpdated: z.string().describe('最後更新時間 ISO 8601'),
+    machineId: z.string(),
+    status:    z.enum(['running', 'idle', 'error']).describe('運作狀態'),
+    oee:       z.number(),
+    alarms:    z.array(z.unknown()),
+    queriedAt: z.string().describe('查詢時間 ISO 8601'),
+    orderId:   z.string().nullable().optional(),
   }),
   permissions: ['machine.read'],
   timeout: 8_000,
@@ -608,11 +611,13 @@ const machineExecuteOrder = defineTool({
   tags: ['machine', 'write'],
   description: '在 Pi 節點執行工單（讀取 data_orders.json）',
   inputSchema: z.object({
+    machineId: z.string().describe('機台 ID，如 CNC-01'),
     orderId:  z.string().describe('工單 ID，如 WO-2026-001'),
     quantity: z.number().optional().describe('執行數量（省略時沿用工單預設）'),
   }),
   outputSchema: z.object({
     success:     z.boolean(),
+    machineId:   z.string(),
     orderId:     z.string(),
     product:     z.string(),
     material:    z.string(),
@@ -673,11 +678,11 @@ const orchestratorEchoRtt = defineTool({
   handler: notImplemented,
 });
 
-const orchestratorDeployServer = defineTool({
-  name: 'orchestrator.deployServer',
+const orchestratorUpdateSubWebRuntime = defineTool({
+  name: 'orchestrator.updateSubWebRuntime',
   version: '1.0.0',
   tags: ['orchestrator', 'write'],
-  description: '在新節點安裝或更新 Pi Sub-Web 伺服器',
+  description: '在目前節點本機安裝或更新 Sub-Web runtime；不會透過 SSH 部署其他節點',
   inputSchema: z.object({
     hibaRoot: z.string().optional().describe('安裝根目錄，預設 /opt/hiba'),
     nodeId:   z.string().optional().describe('節點 ID，預設 m1'),
@@ -780,7 +785,7 @@ export const allHibaTools = [
   machineExecuteOrder,
   envReadSensor,
   orchestratorEchoRtt,
-  orchestratorDeployServer,
+  orchestratorUpdateSubWebRuntime,
   materialReadAttachment,
   orchestratorListAgents,
 ];

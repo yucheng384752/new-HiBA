@@ -1,5 +1,7 @@
 # deploy_http — HTTP Sub-Web 節點部署說明書
 
+> Manifest 最新規範版本：Tool `1.0.0` / metadata schema `1.0`。兩者獨立版控；只更新說明或摘要 metadata 不得提升 Tool 執行版本。每個腳本必須提供 `description`、`inputSchema`、`outputSchema` 與 `summaryHints`；Node 的 `/scripts` 是 Accounting 與 LLM 摘要的資料來源。完整規範見 `HiBA腳本Manifest與LLM摘要規範.md`。
+
 ## 概覽
 
 此資料夾用於將 Raspberry Pi 設定為 **HTTP REST Sub-Web 節點**，提供以下功能：
@@ -23,7 +25,7 @@ deploy_http/
 ├── 01_tpm_init.sh         ← TPM 金鑰初始化（選用，需 tpm2-tools）
 ├── 01_tpm_full_setup.sh   ← TPM 軟體模擬版（用 swtpm，測試用途）
 ├── sub_web_server.js      ← Pi 端 Express.js 伺服器主程式
-├── system.deployServer.py ← 自部署腳本（舊系統加裝用，透過 Dashboard 執行）
+├── system.updateSubWebRuntime.py ← 本機 runtime 安裝／更新腳本（舊系統加裝用）
 └── README.md              ← 本說明書
 ```
 
@@ -158,8 +160,8 @@ tail -f /opt/hiba/logs/subweb.log
 
 1. Dashboard → 選擇節點 → Deploy 分頁
 2. 切換至 **Script 模式**
-3. 上傳 `system.deployServer.py`，腳本名稱填 `system.deployServer`
-4. Scripts 分頁 → 找到 `system.deployServer` → Execute
+3. 上傳 `system.updateSubWebRuntime.py`，腳本名稱填 `system.updateSubWebRuntime`
+4. Scripts 分頁 → 找到 `system.updateSubWebRuntime` → Execute
 5. 腳本會自動寫入新版 JS、重啟服務
 
 ---

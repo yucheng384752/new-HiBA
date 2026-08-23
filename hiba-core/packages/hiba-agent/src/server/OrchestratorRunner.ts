@@ -32,6 +32,10 @@ export interface OrchestratorOptions {
   nodeAddresses?: Map<string, string>;
   /** Timeout for each remote /api/execute call (ms). Default: 30_000 */
   dispatchTimeoutMs?: number;
+  /** Extra attempts on the same node before failover. Default: 1 */
+  reconnectAttempts?: number;
+  /** Delay between reconnect attempts (ms). Default: 1_000 */
+  reconnectDelayMs?: number;
   /**
    * Accounting server base URL for dynamic node address lookup.
    * When set, calls GET /api/nodes once per run() to discover nodes not in nodeAddresses.
@@ -53,6 +57,8 @@ export interface RunHooks {
 export class OrchestratorRunner {
   private readonly nodeAddresses: Map<string, string>;
   private readonly dispatchTimeoutMs: number;
+  private readonly reconnectAttempts: number;
+  private readonly reconnectDelayMs: number;
   private readonly accountingUrl: string | undefined;
   /** Cache: nodeUrl → Map<toolName, scriptName> for Pi-compat nodes */
   private readonly piManifestCache = new Map<string, Map<string, string>>();
@@ -63,7 +69,9 @@ export class OrchestratorRunner {
     options: OrchestratorOptions = {},
   ) {
     this.nodeAddresses     = options.nodeAddresses    ?? new Map();
-    this.dispatchTimeoutMs = options.dispatchTimeoutMs ?? 30_000;
+    this.dispatchTimeoutMs = safeInteger(options.dispatchTimeoutMs, 30_000, 1);
+    this.reconnectAttempts = safeInteger(options.reconnectAttempts, 1);
+    this.reconnectDelayMs  = safeInteger(options.reconnectDelayMs, 1_000);
     this.accountingUrl     = options.accountingUrl;
   }
 
@@ -217,28 +225,46 @@ export class OrchestratorRunner {
       return { result: await this.toolbox.execute(step.toolName as never, step.input, ctx), dispatched: 'local', nodeId: 'local' };
     }
 
-    const target = await this.ensureNodeTool(step, addresses, nodes);
-    const agentUrl = target?.agentUrl;
-    if (agentUrl) {
-      return {
-        result: await this.remoteDispatch(agentUrl, { ...step, nodeId: target.nodeId }, ctx),
-        dispatched: 'remote',
-        nodeId: target.nodeId,
-      };
+    const attempted = new Set<string>();
+    let target = await this.ensureNodeTool(step, addresses, nodes, attempted);
+    let lastResult: ToolResult | undefined;
+    let lastNodeId = step.nodeId;
+
+    while (target) {
+      const targetStep = { ...step, nodeId: target.nodeId };
+      lastNodeId = target.nodeId;
+      for (let attempt = 0; attempt <= this.reconnectAttempts; attempt++) {
+        const result = await this.remoteDispatch(target.agentUrl, targetStep, ctx);
+        if (result.success || !result.retryable) {
+          return { result, dispatched: 'remote', nodeId: target.nodeId };
+        }
+        lastResult = result;
+        if (attempt < this.reconnectAttempts && this.reconnectDelayMs > 0) {
+          await delay(this.reconnectDelayMs);
+        }
+      }
+      attempted.add(target.nodeId);
+      target = await this.ensureNodeTool(step, addresses, nodes, attempted);
     }
-    return { result: failure('AGENT_NOT_REGISTERED', `No online node can execute '${step.toolName}@${step.version}'`), dispatched: 'remote', nodeId: step.nodeId };
+
+    return {
+      result: lastResult ?? failure('AGENT_NOT_REGISTERED', `No online node can execute '${step.toolName}@${step.version}'`),
+      dispatched: 'remote',
+      nodeId: lastNodeId,
+    };
   }
 
   private async ensureNodeTool(
     step: PlanStep,
     addresses: Map<string, string>,
     nodes: NodeDescriptor[],
+    excluded: Set<string>,
   ): Promise<{ nodeId: string; agentUrl: string } | null> {
-    const staticUrl = this.nodeAddresses.get(step.nodeId);
-    if (staticUrl) return { nodeId: step.nodeId, agentUrl: staticUrl };
+    const assignedUrl = addresses.get(step.nodeId);
+    if (assignedUrl && !excluded.has(step.nodeId)) return { nodeId: step.nodeId, agentUrl: assignedUrl };
 
     const online = nodes
-      .filter(node => node.agentUrl && node.status !== 'offline')
+      .filter(node => node.agentUrl && node.status !== 'offline' && !excluded.has(node.nodeId))
       .sort((a, b) => a.nodeId.localeCompare(b.nodeId));
     const hasTool = (node: NodeDescriptor) => node.resources.some(
       tool => tool.name === step.toolName && (tool.version ?? '1.0.0') === step.version,
@@ -281,6 +307,8 @@ export class OrchestratorRunner {
       'Content-Type': 'application/json',
       'X-Agent-Id':   ctx.agentId,
       'X-Trace-Id':   ctx.traceId,
+      'X-Step-Id':    step.stepId,
+      'X-Idempotency-Key': `${ctx.traceId}:${step.stepId}`,
       'X-Depth':      String(ctx.depth),
     };
     try {
@@ -303,18 +331,29 @@ export class OrchestratorRunner {
       const durationMs = Date.now() - startedAt;
 
       if (!res.ok) {
+        const unavailable = res.status === 502 || res.status === 503 || res.status === 504;
+        const responseText = (await res.text().catch(() => '')).slice(0, 2_000);
+        let remoteResponse: unknown = responseText;
+        try { remoteResponse = JSON.parse(responseText); } catch { /* keep text */ }
+        const remote = remoteResponse && typeof remoteResponse === 'object'
+          ? remoteResponse as Record<string, unknown>
+          : {};
+        const remoteError = typeof remote['stderr'] === 'string'
+          ? remote['stderr']
+          : typeof remote['error'] === 'string' ? remote['error'] : responseText;
         return createToolFailure(
-          'HANDLER_EXECUTION_FAILED',
-          `Remote node '${step.nodeId}' returned HTTP ${res.status}`,
-          { durationMs, executedAt, details: { httpStatus: res.status, nodeId: step.nodeId } },
+          unavailable ? 'SERVICE_UNAVAILABLE' : 'HANDLER_EXECUTION_FAILED',
+          `Remote node '${step.nodeId}' returned HTTP ${res.status}${remoteError ? `: ${remoteError}` : ''}`,
+          { durationMs, executedAt, details: { httpStatus: res.status, nodeId: step.nodeId, remoteResponse } },
         );
       }
 
       const body = await res.json() as unknown;
       return this.validateRemoteResult(body, step, durationMs, executedAt);
     } catch (err) {
+      const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
       return createToolFailure(
-        'HANDLER_EXECUTION_FAILED',
+        timedOut ? 'TOOL_TIMEOUT' : 'NODE_OFFLINE',
         `Dispatch to '${step.nodeId}' (${agentUrl}) failed: ${err instanceof Error ? err.message : String(err)}`,
         { durationMs: Date.now() - startedAt, details: { nodeId: step.nodeId, agentUrl } },
       );
@@ -480,6 +519,14 @@ function partition<T>(arr: T[], pred: (x: T) => boolean): [T[], T[]] {
   const no: T[] = [];
   for (const x of arr) (pred(x) ? yes : no).push(x);
   return [yes, no];
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function safeInteger(value: number | undefined, fallback: number, minimum = 0): number {
+  return value !== undefined && Number.isFinite(value) ? Math.max(minimum, Math.floor(value)) : fallback;
 }
 
 function resolveStepReferences(value: unknown, outputs: Map<string, unknown>): unknown {

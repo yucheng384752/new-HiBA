@@ -41,3 +41,9 @@ swagger-cli.ts
 swagger-cli-package.json
 2026-*-adjectives*.md
 2026-*-particles*.md
+
+# TODO
+TODO.md
+
+# env.verifyFileIo test artifacts (overwritten on every run, not source)
+scripts_pi/**/test_io.txt

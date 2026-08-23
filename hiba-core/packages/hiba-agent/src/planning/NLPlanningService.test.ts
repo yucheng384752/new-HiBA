@@ -69,10 +69,13 @@ function makeLLM(rawJson: unknown): jest.Mocked<LLMClient> {
 }
 
 function makeAccounting(resources: NodeResourceMap = mockResources): jest.Mocked<AccountingClient> {
+  const nodes = Object.entries(resources).map(([nodeId, nodeResources]) => ({
+    ...mockNodes[0]!, nodeId, agentUrl: `http://${nodeId}`, resources: nodeResources,
+  }));
   return {
     listNodeResources: jest.fn<AccountingClient['listNodeResources']>().mockResolvedValue(resources),
     getNodeResources:  jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
-    listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(mockNodes),
+    listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(nodes),
   };
 }
 
@@ -135,13 +138,60 @@ describe('NLPlanningService', () => {
 
     const plan = await svc.plan('protect a file', ctx);
 
-    expect(plan.steps).toEqual([]);
+    expect(plan.steps).toHaveLength(1);
+    expect(plan.error).toBeUndefined();
     expect(plan.validationIssues).toEqual(expect.arrayContaining([
       expect.objectContaining({ code: 'INPUT_REQUIRED', field: 'filePath' }),
     ]));
     expect(plan.missingInputs).toEqual([
       { stepId: 'S1', toolName: 'material.protectFile', fields: ['filePath'] },
     ]);
+  });
+
+  it('retries once with a correction when the LLM hallucinates a tool name not in the catalog', async () => {
+    const hallucinatedPlan = {
+      steps: [{
+        stepId: 'S1', toolName: 'material.doesNotExist', nodeId: 'node1',
+        version: '1.0.0', input: { filePath: '/opt/models/model.xml' }, dependsOn: [],
+      }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const llm = {
+      complete: jest.fn<LLMClient['complete']>()
+        .mockResolvedValueOnce({ rawJson: hallucinatedPlan })
+        .mockResolvedValueOnce({ rawJson: validPlanJson }),
+    };
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => [protectFileTool] },
+    });
+
+    const plan = await svc.plan('protect a file', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(2);
+    const secondCallTask = llm.complete.mock.calls[1]![0].task;
+    expect(secondCallTask).toContain('material.doesNotExist');
+    expect(plan.error).toBeUndefined();
+    expect(plan.steps).toEqual([expect.objectContaining({ toolName: 'material.protectFile' })]);
+  });
+
+  it('surfaces a validation error when the retry still hallucinates a tool name', async () => {
+    const hallucinatedPlan = {
+      steps: [{
+        stepId: 'S1', toolName: 'material.doesNotExist', nodeId: 'node1',
+        version: '1.0.0', input: { filePath: '/opt/models/model.xml' }, dependsOn: [],
+      }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const llm = makeLLM(hallucinatedPlan); // every call returns the same hallucinated plan
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => [protectFileTool] },
+    });
+
+    const plan = await svc.plan('protect a file', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(2); // one retry, then gives up
+    expect(plan.steps).toHaveLength(0);
+    expect(plan.error).toMatch(/Plan validation failed/);
   });
 
   it('returns error plan when LLM output is not a valid ExecutionPlan shape', async () => {
@@ -210,6 +260,75 @@ describe('NLPlanningService', () => {
 
     expect(result).toEqual(mockResources);
     expect(accounting.listNodeResources).toHaveBeenCalledTimes(1);
+  });
+
+  it('normalizes sequential intent and removes unknown tool input fields', async () => {
+    const rawPlan = {
+      ...validPlanJson,
+      steps: [
+        validPlanJson.steps[0],
+        {
+          ...validPlanJson.steps[0], stepId: 'S2',
+          input: { filePath: '/tmp/second.xml', supervisorPolicy: 'fail-fast' },
+        },
+      ],
+    };
+    const svc = new NLPlanningService(makeLLM(rawPlan), makeAccounting(), {
+      toolbox: { list: () => [protectFileTool] },
+    });
+
+    const plan = await svc.plan('先處理第一項，然後接續處理第二項', ctx);
+
+    expect(plan.steps[1]!.dependsOn).toEqual(['S1']);
+    expect(plan.steps[1]!.input).toEqual({ filePath: '/tmp/second.xml' });
+  });
+
+  it('hides meta-tools marked plannerVisible=false from LLM planning context', async () => {
+    const visible = mockResources.node1![0]!;
+    const hidden = {
+      name: 'orchestrator.createTaskChain', type: 'tool', version: '1.0.0',
+      metadata: { plannerVisible: false },
+    };
+    const llm = makeLLM(validPlanJson);
+    const svc = new NLPlanningService(llm, makeAccounting({ node1: [visible, hidden] }));
+
+    await svc.plan('test task', ctx);
+
+    expect(llm.complete).toHaveBeenCalledWith(expect.objectContaining({
+      resources: { node1: [visible] },
+      nodes: [expect.objectContaining({ resources: [visible] })],
+    }));
+  });
+
+  it('summarizes execution results with a fact-only prompt', async () => {
+    const plannerLLM = makeLLM(validPlanJson);
+    const summaryLLM = makeLLM({
+      steps: [{ stepId: 'S1', summary: '查詢成功。' }],
+    });
+    const accounting = makeAccounting({
+      node1: [{
+        name: 'machine.queryStatus', version: '1.1.0', type: 'tool', metadata: {
+          description: '查詢機台狀態',
+          outputSchema: { orderId: { type: 'string', description: '目前工單' } },
+          summaryHints: ['有 orderId 時必須說明目前工單'],
+        },
+      }],
+    });
+    const summary = await new NLPlanningService(plannerLLM, accounting, { summaryLLM }).summarize(
+      '確認 CNC-01 狀態',
+      { steps: [{ stepId: 'S1', nodeId: 'node1', toolName: 'machine.queryStatus', result: { success: true } }] },
+    );
+    expect(summary.summary).toBe('查詢成功。');
+    expect(summary.steps[0]?.stepId).toBe('S1');
+    expect(summaryLLM.complete).toHaveBeenCalledWith(expect.objectContaining({
+      systemPrompt: expect.stringContaining('不得推測'),
+      task: expect.stringContaining('CNC-01'),
+    }));
+    expect(summaryLLM.complete).toHaveBeenCalledWith(expect.objectContaining({
+      task: expect.stringContaining('有 orderId 時必須說明目前工單'),
+    }));
+    expect(accounting.listNodeResources).toHaveBeenCalledTimes(1);
+    expect(plannerLLM.complete).not.toHaveBeenCalled();
   });
 
   it('fills default version "1.0.0" when LLM omits it', async () => {

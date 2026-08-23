@@ -1,5 +1,5 @@
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
-import { HttpLLMClient, summarizeInputSchema } from './HttpLLMClient';
+import { HttpLLMClient, summarizeInputSchema, repairBracketBalance } from './HttpLLMClient';
 import type { LLMPayload } from './NLPlanningService';
 import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
 import type { ToolSpec } from '../types/hiba.types';
@@ -38,6 +38,52 @@ describe('summarizeInputSchema', () => {
   it('falls back to "any" when a property has no declared type', () => {
     const schema = { properties: { note: {} }, required: [] };
     expect(summarizeInputSchema(schema)).toBe('note: any (optional)');
+  });
+});
+
+// ── repairBracketBalance ─────────────────────────────────────────────────────
+// Both malformed strings below are verbatim hiba-planner:latest output captured
+// live (fix/planner-prompt-context-overflow diagnosis), not hand-crafted.
+
+describe('repairBracketBalance', () => {
+  it('is a no-op on already-valid JSON', () => {
+    const valid = '{"steps":[{"stepId":"S1","toolName":"a.b","input":{"x":1}}],"supervisorPolicy":"fail-fast"}';
+    expect(repairBracketBalance(valid)).toBe(valid);
+  });
+
+  it('inserts a step object\'s missing closing brace before the array/object closers', () => {
+    const broken = '{"steps":[{"stepId":"S1","toolName":"env.readTemperature","nodeId":"m2","version":"1.0.0",'
+      + '"input":{"sensorId":"temperature_sensor"},"dependsOn":[]},{"stepId":"S2","toolName":"material.recordAudit",'
+      + '"nodeId":"m3","version":"1.0.0","input":{"auditType":"temperature_log","result":"env.readTemperature(S1)",'
+      + '"notes":"溫度記錄"}],"supervisorPolicy":"fail-fast"}';
+
+    const repaired = repairBracketBalance(broken);
+
+    expect(() => JSON.parse(repaired)).not.toThrow();
+    const parsed = JSON.parse(repaired) as { steps: unknown[]; supervisorPolicy: string };
+    expect(parsed.steps).toHaveLength(2);
+    expect(parsed.supervisorPolicy).toBe('fail-fast');
+  });
+
+  it('substitutes a stray ")" for the "}" it was meant to be, without touching parens inside strings', () => {
+    const broken = '{"steps":[{"stepId":"S1","toolName":"orchestrator.getAuditSummary","nodeId":"m2",'
+      + '"version":"1.0.0","input":{"timeRange":{"start":"now-24h","end":"now"}),"dependsOn":[]}],'
+      + '"supervisorPolicy":"fail-fast"}';
+
+    const repaired = repairBracketBalance(broken);
+
+    expect(() => JSON.parse(repaired)).not.toThrow();
+    const parsed = JSON.parse(repaired) as { steps: Array<{ input: { timeRange: { start: string; end: string } } }> };
+    expect(parsed.steps[0]!.input.timeRange).toEqual({ start: 'now-24h', end: 'now' });
+  });
+
+  it('leaves parentheses inside string values untouched', () => {
+    const withParenInString = '{"note":"call fn(x)"}';
+    expect(repairBracketBalance(withParenInString)).toBe(withParenInString);
+  });
+
+  it('drops a stray ")" that has nothing open left to close', () => {
+    expect(repairBracketBalance('{})')).toBe('{}');
   });
 });
 
@@ -86,8 +132,81 @@ describe('HttpLLMClient system prompt', () => {
 
     const systemPrompt = capturedBody!.messages[0]!.content;
     expect(systemPrompt).not.toContain('outputSchema');
+    expect(systemPrompt).toContain('Use the minimum number of steps');
+    expect(systemPrompt).toContain('machine.executeOrder step');
     // Rough token proxy: ~4 chars/token. Must clear headroom under a 4096-token
     // local context window even with 36 tools registered.
     expect(systemPrompt.length / 4).toBeLessThan(3500);
+  });
+});
+
+// ── HttpLLMClient malformed-JSON retry ──────────────────────────────────────
+// Regression coverage: hiba-planner occasionally emits output that isn't
+// JSON at all (e.g. plain prose), which repairBracketBalance can't fix since
+// there's nothing bracket-shaped to repair. complete() must retry once with
+// the bad output shown back to the model in that case, instead of silently
+// handing the raw string downstream. (A merely bracket-broken — but
+// otherwise JSON-shaped — response is now recovered inline by
+// repairBracketBalance without needing a network round-trip at all; see the
+// 'repairBracketBalance' describe block above.)
+
+describe('HttpLLMClient malformed-JSON retry', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  const payload: LLMPayload = { task: 'do something', resources: {}, nodes: [], tools: [] };
+
+  it('retries once and returns the parsed object when the retry is valid JSON', async () => {
+    const calls: Array<{ messages: Array<{ role: string; content: string }> }> = [];
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string);
+      calls.push(body);
+      const content = calls.length === 1
+        ? 'sorry, I cannot determine a plan for that task' // not JSON-shaped at all — unrepairable
+        : '{"steps":[]}';
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+    });
+
+    const client = new HttpLLMClient('http://localhost:11434/v1/chat/completions', { format: 'openai' });
+    const { rawJson } = await client.complete(payload);
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1]!.messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ role: 'assistant' }),
+      expect.objectContaining({ role: 'user', content: expect.stringContaining('not valid JSON') }),
+    ]));
+    expect(rawJson).toEqual({ steps: [] });
+  });
+
+  it('recovers a merely bracket-broken response inline, without a retry round-trip', async () => {
+    let callCount = 0;
+    jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      callCount += 1;
+      const content = '{"steps":[{"stepId":"S1","toolName":"a.b","nodeId":"n1","version":"1.0.0","input":{"x":1}]'; // missing one }
+      return new Response(JSON.stringify({ choices: [{ message: { content } }] }));
+    });
+
+    const client = new HttpLLMClient('http://localhost:11434/v1/chat/completions', { format: 'openai' });
+    const { rawJson } = await client.complete(payload);
+
+    expect(callCount).toBe(1);
+    expect(rawJson).toEqual(expect.objectContaining({
+      steps: [expect.objectContaining({ stepId: 'S1', toolName: 'a.b' })],
+    }));
+  });
+
+  it('does not retry a second time — persistent malformed JSON returns the raw string once', async () => {
+    let callCount = 0;
+    jest.spyOn(global, 'fetch').mockImplementation(async () => {
+      callCount += 1;
+      return new Response(JSON.stringify({ choices: [{ message: { content: 'still not json{{{' } }] }));
+    });
+
+    const client = new HttpLLMClient('http://localhost:11434/v1/chat/completions', { format: 'openai' });
+    const { rawJson } = await client.complete(payload);
+
+    expect(callCount).toBe(2); // one retry attempt, then give up
+    expect(rawJson).toBe('still not json{{{');
   });
 });

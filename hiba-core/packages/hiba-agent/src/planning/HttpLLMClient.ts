@@ -41,9 +41,27 @@ export class HttpLLMClient implements LLMClient {
           ? this.options.systemPromptTemplate(payload.resources, payload.nodes, payload.tools)
           : buildDefaultSystemPrompt(payload.resources, payload.nodes, payload.tools));
 
+    const first = await this.fetchAndParse(system, payload.task);
+    if (typeof first.parsed !== 'string') return { rawJson: first.parsed };
+
+    // hiba-planner occasionally emits syntactically broken JSON (mismatched
+    // braces/parens) that fails both JSON.parse and the fenced-code-block
+    // fallback in tryParseJson, which returns the raw string as-is. Handing
+    // that string downstream just produces a confusing "expected object,
+    // received string" validation error, so retry once with the bad output
+    // shown back to the model and an explicit correction request.
+    const retry = await this.fetchAndParse(system, payload.task, first.raw);
+    return { rawJson: retry.parsed };
+  }
+
+  private async fetchAndParse(
+    system: string,
+    task: string,
+    previousInvalidOutput?: string,
+  ): Promise<{ raw: string; parsed: unknown }> {
     const body = this.options.format === 'ollama'
-      ? this.ollamaBody(system, payload.task)
-      : this.openaiBody(system, payload.task);
+      ? this.ollamaBody(system, task, previousInvalidOutput)
+      : this.openaiBody(system, task, previousInvalidOutput);
 
     const res = await fetch(this.endpoint, {
       method: 'POST',
@@ -59,31 +77,45 @@ export class HttpLLMClient implements LLMClient {
 
     const data = await res.json() as Record<string, unknown>;
     const raw = extractText(data, this.options.format ?? 'openai');
-    return { rawJson: tryParseJson(raw) };
+    return { raw, parsed: tryParseJson(raw) };
   }
 
-  private openaiBody(system: string, task: string) {
+  private openaiBody(system: string, task: string, previousInvalidOutput?: string) {
+    const messages = [
+      { role: 'system', content: system },
+      { role: 'user',   content: task   },
+    ];
+    if (previousInvalidOutput !== undefined) {
+      messages.push(
+        { role: 'assistant', content: previousInvalidOutput },
+        { role: 'user',      content: JSON_CORRECTION_MESSAGE },
+      );
+    }
     return {
       model: this.options.model ?? 'hiba-planner',
-      messages: [
-        { role: 'system',  content: system },
-        { role: 'user',    content: task   },
-      ],
+      messages,
       response_format: { type: 'json_object' },
       temperature: this.options.temperature ?? 0.1,
     };
   }
 
-  private ollamaBody(system: string, task: string) {
+  private ollamaBody(system: string, task: string, previousInvalidOutput?: string) {
+    const prompt = previousInvalidOutput === undefined
+      ? `${system}\n\nUser task: ${task}`
+      : `${system}\n\nUser task: ${task}\n\nYour previous response:\n${previousInvalidOutput}\n\n${JSON_CORRECTION_MESSAGE}`;
     return {
       model:  this.options.model ?? 'hiba-planner',
-      prompt: `${system}\n\nUser task: ${task}`,
+      prompt,
       format: 'json',
       stream: false,
       options: { temperature: this.options.temperature ?? 0.1 },
     };
   }
 }
+
+const JSON_CORRECTION_MESSAGE = 'Your previous response was not valid JSON, or did not match the '
+  + 'required shape. Return ONLY a single valid JSON object matching the schema above — no markdown '
+  + 'wrapper, no commentary, and make sure every brace/bracket/parenthesis is correctly matched.';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -98,8 +130,64 @@ function extractText(data: Record<string, unknown>, format: 'openai' | 'ollama')
 function tryParseJson(text: string): unknown {
   try { return JSON.parse(text); } catch { /* try extracting code fence */ }
   const m = /```(?:json)?\s*([\s\S]+?)\s*```/.exec(text);
+  const candidate = m?.[1] ?? text;
   if (m?.[1]) { try { return JSON.parse(m[1]); } catch { /* fall through */ } }
+  const repaired = repairBracketBalance(candidate);
+  if (repaired !== candidate) {
+    try { return JSON.parse(repaired); } catch { /* fall through */ }
+  }
   return text;
+}
+
+/**
+ * Mechanically repairs the two malformed-JSON patterns observed from
+ * hiba-planner under the full production prompt: a step object missing its
+ * closing `}` before the enclosing `]`/`}`, and a stray `)` used where a
+ * `}` was meant (valid JSON never contains a bare parenthesis outside a
+ * string value, so any `)` seen outside a string is always a mistake here).
+ *
+ * Tracks a stack of the closer each open `{`/`[` expects. A `}` or `]` that
+ * doesn't match the current top first pops and emits whatever closer(s) are
+ * actually pending (repairing a missing closer), then consumes the matching
+ * one; a `)` always closes exactly one pending scope. Never touches string
+ * content, and is a no-op on already-balanced JSON, so callers can attempt
+ * it unconditionally.
+ */
+export function repairBracketBalance(text: string): string {
+  const stack: Array<'}' | ']'> = [];
+  let out = '';
+  let inString = false;
+  let escaped = false;
+
+  for (const ch of text) {
+    if (inString) {
+      out += ch;
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+
+    if (ch === '"') { inString = true; out += ch; continue; }
+    if (ch === '{') { stack.push('}'); out += ch; continue; }
+    if (ch === '[') { stack.push(']'); out += ch; continue; }
+
+    if (ch === '}' || ch === ']') {
+      while (stack.length > 0 && stack[stack.length - 1] !== ch) out += stack.pop();
+      out += stack.length > 0 ? stack.pop()! : ch;
+      continue;
+    }
+
+    if (ch === ')') {
+      if (stack.length > 0) out += stack.pop();
+      continue; // a stray ')' with nothing open left to close is dropped
+    }
+
+    out += ch;
+  }
+
+  while (stack.length > 0) out += stack.pop();
+  return out;
 }
 
 function buildDefaultSystemPrompt(
@@ -176,7 +264,14 @@ Correct plan:
 5. dependsOn lists stepIds that must complete before this step
 6. input must validate against the tool's inputSchema; never invent parameter names
 7. protocolVersion must be "1.0"
-8. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
+8. Use the minimum number of steps that directly satisfy the task. Do not add
+   status checks, material/attachment operations, or orchestration helpers
+   unless the user explicitly requests them.
+9. Each explicitly requested machine/order execution maps to exactly one
+   machine.executeOrder step. Preserve its nodeId, machineId, and orderId.
+   Words such as "接續", "然後", or "after" mean the later step dependsOn the
+   preceding step.
+10. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
 }
 
 /**
