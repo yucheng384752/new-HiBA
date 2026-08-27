@@ -41,7 +41,7 @@ export class HttpLLMClient implements LLMClient {
           ? this.options.systemPromptTemplate(payload.resources, payload.nodes, payload.tools)
           : buildDefaultSystemPrompt(payload.resources, payload.nodes, payload.tools));
 
-    const first = await this.fetchAndParse(system, payload.task);
+    const first = await this.fetchAndParse(system, payload.task, payload.tools);
     if (typeof first.parsed !== 'string') return { rawJson: first.parsed };
 
     // hiba-planner occasionally emits syntactically broken JSON (mismatched
@@ -50,17 +50,18 @@ export class HttpLLMClient implements LLMClient {
     // that string downstream just produces a confusing "expected object,
     // received string" validation error, so retry once with the bad output
     // shown back to the model and an explicit correction request.
-    const retry = await this.fetchAndParse(system, payload.task, first.raw);
+    const retry = await this.fetchAndParse(system, payload.task, payload.tools, first.raw);
     return { rawJson: retry.parsed };
   }
 
   private async fetchAndParse(
     system: string,
     task: string,
+    tools: ToolSpec[],
     previousInvalidOutput?: string,
   ): Promise<{ raw: string; parsed: unknown }> {
     const body = this.options.format === 'ollama'
-      ? this.ollamaBody(system, task, previousInvalidOutput)
+      ? this.ollamaBody(system, task, tools, previousInvalidOutput)
       : this.openaiBody(system, task, previousInvalidOutput);
 
     const res = await fetch(this.endpoint, {
@@ -99,14 +100,19 @@ export class HttpLLMClient implements LLMClient {
     };
   }
 
-  private ollamaBody(system: string, task: string, previousInvalidOutput?: string) {
+  private ollamaBody(system: string, task: string, tools: ToolSpec[], previousInvalidOutput?: string) {
     const prompt = previousInvalidOutput === undefined
       ? `${system}\n\nUser task: ${task}`
       : `${system}\n\nUser task: ${task}\n\nYour previous response:\n${previousInvalidOutput}\n\n${JSON_CORRECTION_MESSAGE}`;
     return {
       model:  this.options.model ?? 'hiba-planner',
       prompt,
-      format: 'json',
+      // A JSON Schema (rather than the bare string 'json') turns on Ollama's
+      // grammar-constrained decoding: toolName is restricted to an enum of the
+      // tools actually on offer, so the model cannot emit a hallucinated name
+      // (e.g. "env.readTemperature") — it's rejected at the token level, not
+      // caught after the fact by validatePlan's TOOL_NOT_FOUND retry.
+      format: buildPlanJsonSchema(tools),
       stream: false,
       options: { temperature: this.options.temperature ?? 0.1 },
     };
@@ -188,6 +194,45 @@ export function repairBracketBalance(text: string): string {
 
   while (stack.length > 0) out += stack.pop();
   return out;
+}
+
+/**
+ * Builds the JSON Schema handed to Ollama's `format` field (in place of the
+ * bare string `'json'`) to turn on grammar-constrained decoding. Only
+ * `toolName` is restricted to the tools actually on offer for this request —
+ * step `input` is deliberately left as a generic object rather than a
+ * per-tool conditional schema (would need an `if`/`then` branch per tool and
+ * grows with the catalog); malformed `input` is still caught by
+ * validatePlan's existing schema check and retry. Passed via `format`, this
+ * does not add to the prompt's token budget the way spelling it out in text
+ * would (see summarizeInputSchema above for why that budget is tight).
+ */
+export function buildPlanJsonSchema(tools: ToolSpec[]): Record<string, unknown> {
+  const toolNames = tools.map(tool => tool.name);
+  return {
+    type: 'object',
+    properties: {
+      protocolVersion: { type: 'string', const: '1.0' },
+      steps: {
+        type: 'array',
+        items: {
+          type: 'object',
+          properties: {
+            stepId:    { type: 'string' },
+            toolName:  toolNames.length ? { type: 'string', enum: toolNames } : { type: 'string' },
+            nodeId:    { type: 'string' },
+            version:   { type: 'string' },
+            input:     { type: 'object' },
+            dependsOn: { type: 'array', items: { type: 'string' } },
+          },
+          required: ['stepId', 'toolName', 'nodeId', 'version', 'input', 'dependsOn'],
+        },
+      },
+      supervisorPolicy: { type: 'string', enum: ['fail-fast', 'partial-success'] },
+      error: { type: 'string' },
+    },
+    required: ['protocolVersion', 'steps', 'supervisorPolicy'],
+  };
 }
 
 function buildDefaultSystemPrompt(
