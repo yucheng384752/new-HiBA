@@ -1,0 +1,11 @@
+{
+  "hiba_workflow_smoke": {
+    "file_name": "data/hiba-v1-train.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  }
+}
