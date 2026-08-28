@@ -57,8 +57,16 @@ export function validateRow(row) {
   fail(Array.isArray(context.tools), 'input.tools must be array');
   fail(Array.isArray(context.nodes), 'input.nodes must be array');
   fail(plan.protocolVersion === PROTOCOL_VERSION, 'output protocolVersion must be 1.0');
-  fail(Array.isArray(plan.steps) && plan.steps.length > 0, 'output.steps must be non-empty array');
+  fail(Array.isArray(plan.steps), 'output.steps must be array');
   fail(['fail-fast', 'partial-success'].includes(plan.supervisorPolicy), 'invalid supervisorPolicy');
+  // reject 決策 pattern（見 plan_LLM_訓練清單.md §三-E）：steps 為空時必須附上 error 說明；
+  // 其餘情況（無 error）steps 不得為空，避免規劃器學到「隨便回空計畫」。
+  if (plan.error !== undefined) {
+    fail(typeof plan.error === 'string' && plan.error.length > 0, 'output.error must be non-empty string when present');
+    fail(plan.steps.length === 0, 'output.steps must be empty when error is present');
+  } else {
+    fail(plan.steps.length > 0, 'output.steps must be non-empty array when no error');
+  }
 
   const tools = new Map(context.tools.map(item => [`${item.name}@${item.version}`, item]));
   const nodes = new Map(context.nodes.map(item => [item.nodeId, item]));
