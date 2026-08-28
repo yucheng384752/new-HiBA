@@ -161,7 +161,7 @@ describe('HttpLLMClient system prompt', () => {
       timeoutMs: 5000,
     }));
 
-    const payload: LLMPayload = { task: 'do something', resources: {}, nodes: [], tools: manyTools };
+    const payload: LLMPayload = { task: 'do something', resources: {}, nodes: [], tools: manyTools, requestedAt: '2026-01-01T00:00:00Z' };
 
     let capturedBody: { messages: Array<{ content: string }> } | undefined;
     jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
@@ -197,7 +197,7 @@ describe('HttpLLMClient malformed-JSON retry', () => {
     jest.restoreAllMocks();
   });
 
-  const payload: LLMPayload = { task: 'do something', resources: {}, nodes: [], tools: [] };
+  const payload: LLMPayload = { task: 'do something', resources: {}, nodes: [], tools: [], requestedAt: '2026-01-01T00:00:00Z' };
 
   it('retries once and returns the parsed object when the retry is valid JSON', async () => {
     const calls: Array<{ messages: Array<{ role: string; content: string }> }> = [];
@@ -266,6 +266,7 @@ describe('HttpLLMClient ollama format', () => {
       resources: {},
       nodes: [],
       tools: [tool('machine.queryStatus')],
+      requestedAt: '2026-01-01T00:00:00Z',
     };
 
     let capturedBody: { format: unknown } | undefined;
@@ -287,6 +288,7 @@ describe('HttpLLMClient ollama format', () => {
       resources: {},
       nodes: [],
       tools: [tool('machine.queryStatus')],
+      requestedAt: '2026-01-01T00:00:00Z',
     };
 
     let capturedBody: { response_format: { type: string; json_schema: { schema: unknown } } } | undefined;
