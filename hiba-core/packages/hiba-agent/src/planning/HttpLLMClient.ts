@@ -240,7 +240,11 @@ export function buildPlanJsonSchema(tools: ToolSpec[]): Record<string, unknown> 
   };
 }
 
-function buildDefaultSystemPrompt(
+// Exported so the training-data generator can build system prompts identical
+// to what production actually sends (single source of truth for the prompt
+// format — see plan_LLM_訓練清單.md §十四 for why training/eval previously
+// diverged from this).
+export function buildDefaultSystemPrompt(
   resources: NodeResourceMap,
   nodes: NodeDescriptor[],
   tools: ToolSpec[],

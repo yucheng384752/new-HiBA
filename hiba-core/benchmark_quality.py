@@ -11,8 +11,6 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 QUALITY_HISTORY_PATH = Path(__file__).parent / "training" / "quality-history.jsonl"
 
-SYSTEM = """You are a HiBA workflow planner. Use only the supplied Core Protocol v1 nodes and tools. Return only one ExecutionPlan JSON object. Tool names, versions, node IDs, input fields, and dependencies must exactly match the supplied context."""
-
 
 def build_plan_json_schema(tools):
     """Python port of HttpLLMClient.ts's buildPlanJsonSchema -- restricts
@@ -48,12 +46,17 @@ def build_plan_json_schema(tools):
 
 
 def query(url, model, row, timeout, schema_format):
-    prompt = f"Core Protocol v1 context:\n{row['input']}\n\nUser task:\n{row['instruction']}"
-    fmt = build_plan_json_schema(json.loads(row["input"])["tools"]) if schema_format else "json"
+    # `system`/`instruction` are now the exact production prompt shape
+    # (built by the real buildDefaultSystemPrompt(), see
+    # plan_LLM_訓練清單.md §十四) instead of this script's own
+    # hand-maintained raw-JSON-context format -- `context` (not sent to the
+    # model) still carries the structured {resources, nodes, tools} this
+    # function needs for schema-constrained decoding.
+    fmt = build_plan_json_schema(json.loads(row["context"])["tools"]) if schema_format else "json"
     body = json.dumps({
         "model": model,
-        "system": SYSTEM,
-        "prompt": prompt,
+        "system": row["system"],
+        "prompt": row["instruction"],
         "format": fmt,
         "stream": False,
         "options": {"temperature": 0},

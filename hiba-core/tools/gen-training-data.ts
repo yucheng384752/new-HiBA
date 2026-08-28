@@ -6,6 +6,17 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { toToolSpec } from '../packages/hiba-agent/src/core/defineTool';
 import { allHibaTools } from '../packages/hiba-agent/src/tools/hiba.tools';
+import { buildDefaultSystemPrompt } from '../packages/hiba-agent/src/planning/HttpLLMClient';
+import type { ToolSpec, NodeDescriptor } from '../packages/hiba-agent/src/types/hiba.types';
+
+// requestedAt anchor for every generated row. Every SCENARIO in this file
+// spells out absolute ISO timestamps in the instruction text itself (see the
+// VALUES.timeRanges comment below) rather than relying on relative
+// expressions ("過去24小時"), so the exact value here doesn't affect any
+// row's correctness -- it just has to be a valid ISO 8601 string, since
+// buildDefaultSystemPrompt requires one (production always has a real one
+// from NLPlanningService.generateNormalizedPlan()).
+const REQUESTED_AT = '2026-08-28T12:00:00Z';
 
 const PROTOCOL_VERSION = '1.0';
 const DEFAULT_OUT_DIR = 'training/data';
@@ -47,7 +58,14 @@ type NodeEntry = {
   lastSeenAt: null;
 };
 
-type TrainingRow = { instruction: string; input: string; output: string };
+// `system` is what actually reaches the model (built by the same
+// buildDefaultSystemPrompt() production uses, so training/eval prompts are
+// byte-for-byte the real prompt shape -- see plan_LLM_訓練清單.md §十四).
+// `context` is NOT fed to the model (dataset_info.json does not map it to
+// any LLaMA-Factory column) -- it's the raw structured {resources, nodes,
+// tools} so validate-dataset.mjs and benchmark_quality.py can still check
+// the plan mechanically instead of re-parsing it out of prose.
+type TrainingRow = { instruction: string; system: string; output: string; context: string };
 
 const timeRangeProp: JsonSchema = {
   type: 'object',
@@ -264,6 +282,13 @@ function resourcesByNode(nodes: NodeEntry[]): Record<string, NodeEntry['resource
   return Object.fromEntries(nodes.map(n => [n.nodeId, n.resources]));
 }
 
+function finishRow(instruction: string, nodes: NodeEntry[], tools: ToolSpecLike[], plan: Record<string, unknown>): TrainingRow {
+  const resources = resourcesByNode(nodes);
+  const system = buildDefaultSystemPrompt(resources, nodes as unknown as NodeDescriptor[], tools as unknown as ToolSpec[], REQUESTED_AT);
+  const context = { protocolVersion: PROTOCOL_VERSION, resources, nodes, tools };
+  return { instruction, system, output: JSON.stringify(plan), context: JSON.stringify(context) };
+}
+
 // ── 資源缺失決策 pattern：delegate / partial / reject ───────────────────────
 // install pattern（先安裝再執行）暫緩：對應的 orchestrator.installTool 尚未實作於
 // hiba.tools.ts，訓練資料若引用一個不存在的工具名稱會違反 Data-First（見任務討論）。
@@ -282,13 +307,12 @@ function buildDelegateRow(index: number): TrainingRow {
     { protocolVersion: PROTOCOL_VERSION, nodeId: offlineId, agentUrl: null, status: 'offline', canInstall: false, resources: [resourceEntry], registeredAt: null, lastSeenAt: null },
     { protocolVersion: PROTOCOL_VERSION, nodeId: backupId, agentUrl: `http://${backupId}:3000`, status: 'online', canInstall: false, resources: [resourceEntry], registeredAt: null, lastSeenAt: null },
   ];
-  const context = { protocolVersion: PROTOCOL_VERSION, resources: resourcesByNode(nodes), nodes, tools: TOOLS };
   const plan = {
     protocolVersion: PROTOCOL_VERSION,
     steps: [{ ...base.steps[0]!, nodeId: backupId }],
     supervisorPolicy: 'fail-fast',
   };
-  return { instruction: base.task, input: JSON.stringify(context), output: JSON.stringify(plan) };
+  return finishRow(base.task, nodes, TOOLS, plan);
 }
 
 function buildPartialRow(index: number): TrainingRow {
@@ -314,10 +338,9 @@ function buildPartialRow(index: number): TrainingRow {
     ...step(`S${i + 1}`, 'machine.queryStatus', { machineId: entry.target }),
     nodeId: entry.id,
   }));
-  const context = { protocolVersion: PROTOCOL_VERSION, resources: resourcesByNode(nodes), nodes, tools: TOOLS };
   const plan = { protocolVersion: PROTOCOL_VERSION, steps, supervisorPolicy: 'partial-success' };
   const instruction = `查詢 ${targets.join('、')} 三個機台狀態，能查多少算多少`;
-  return { instruction, input: JSON.stringify(context), output: JSON.stringify(plan) };
+  return finishRow(instruction, nodes, TOOLS, plan);
 }
 
 function buildRejectRow(index: number): TrainingRow {
@@ -337,7 +360,6 @@ function buildRejectRow(index: number): TrainingRow {
     registeredAt: null,
     lastSeenAt: null,
   }];
-  const context = { protocolVersion: PROTOCOL_VERSION, resources: resourcesByNode(nodes), nodes, tools: scopedTools };
   const plan = {
     protocolVersion: PROTOCOL_VERSION,
     steps: [] as PlanStep[],
@@ -345,7 +367,7 @@ function buildRejectRow(index: number): TrainingRow {
     error: `TOOL_NOT_FOUND: 目前可用工具目錄不包含 ${restrictedTool}，無法執行此任務`,
   };
   const instruction = `執行工單 ${value(VALUES.orders, index)}，數量 ${10 + (index % 9) * 10}`;
-  return { instruction, input: JSON.stringify(context), output: JSON.stringify(plan) };
+  return finishRow(instruction, nodes, scopedTools, plan);
 }
 
 const DECISION_BUILDERS: Array<(index: number) => TrainingRow> = [buildDelegateRow, buildPartialRow, buildRejectRow];
@@ -378,10 +400,9 @@ function buildRow(index: number): TrainingRow {
     { protocolVersion: PROTOCOL_VERSION, nodeId: piId, agentUrl: `http://${piId}:3000`, status: 'online', canInstall: false, resources: piResources, registeredAt: null, lastSeenAt: null },
     { protocolVersion: PROTOCOL_VERSION, nodeId: installerId, agentUrl: `http://${installerId}:3000`, status: 'online', canInstall: true, resources: [], registeredAt: null, lastSeenAt: null },
   ];
-  const context = { protocolVersion: PROTOCOL_VERSION, resources: resourcesByNode(nodes), nodes, tools: TOOLS };
   const plan = { protocolVersion: PROTOCOL_VERSION, steps: scenario.steps, supervisorPolicy: 'fail-fast' };
 
-  return { instruction: scenario.task, input: JSON.stringify(context), output: JSON.stringify(plan) };
+  return finishRow(scenario.task, nodes, TOOLS, plan);
 }
 
 type Args = { outDir: string; train: number; eval: number };
