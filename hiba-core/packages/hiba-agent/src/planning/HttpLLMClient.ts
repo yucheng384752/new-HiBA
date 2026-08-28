@@ -24,6 +24,7 @@ export interface HttpLLMClientOptions {
     resources: NodeResourceMap,
     nodes: NodeDescriptor[],
     tools: ToolSpec[],
+    requestedAt: string,
   ) => string;
 }
 
@@ -38,8 +39,8 @@ export class HttpLLMClient implements LLMClient {
   async complete(payload: LLMPayload): Promise<{ rawJson: unknown }> {
     const system = payload.systemPrompt
       ?? (this.options.systemPromptTemplate
-          ? this.options.systemPromptTemplate(payload.resources, payload.nodes, payload.tools)
-          : buildDefaultSystemPrompt(payload.resources, payload.nodes, payload.tools));
+          ? this.options.systemPromptTemplate(payload.resources, payload.nodes, payload.tools, payload.requestedAt)
+          : buildDefaultSystemPrompt(payload.resources, payload.nodes, payload.tools, payload.requestedAt));
 
     const first = await this.fetchAndParse(system, payload.task, payload.tools);
     if (typeof first.parsed !== 'string') return { rawJson: first.parsed };
@@ -243,6 +244,7 @@ function buildDefaultSystemPrompt(
   resources: NodeResourceMap,
   nodes: NodeDescriptor[],
   tools: ToolSpec[],
+  requestedAt: string,
 ): string {
   const resourceBlock = Object.entries(resources).length
     ? Object.entries(resources)
@@ -266,6 +268,11 @@ function buildDefaultSystemPrompt(
 
   return `You are a HiBA workflow planner for a hierarchical distributed AI agent system.
 Convert the user's natural language task into a structured JSON execution plan.
+
+## Current Time
+${requestedAt} (ISO 8601). This is your only source for "now" — use it as the
+reference point for any relative time expression in the task (e.g. "過去24小時",
+"本月", "上週"). Never guess or invent a timestamp; compute from this value.
 
 ## Available Nodes and Resources
 ${resourceBlock}
@@ -294,12 +301,31 @@ ${toolBlock}
   "supervisorPolicy": "fail-fast"
 }
 
-## Worked example (illustrates the rule below, not a fixed tool to reuse)
+## Worked examples (illustrate the rules below — tool/field names shown are
+## NOT fixed, always pick real ones from "Available Tools" for the actual task)
+
+Example 1 — single tool:
 Task: "查詢 CNC-01 機台狀態"
 Given "Available Tools" contains: machine.queryStatus@1.0.0 — 機台狀態查詢
 (input: machineId: string (required))
 Correct plan:
 {"protocolVersion":"1.0","steps":[{"stepId":"S1","toolName":"machine.queryStatus","nodeId":"node1","version":"1.0.0","input":{"machineId":"CNC-01"},"dependsOn":[]}],"supervisorPolicy":"fail-fast"}
+
+Example 2 — dependsOn chain ("先...再..." / "然後" means the later step depends on the earlier one):
+Task: "先驗證 node1 上檔案 a.xml 的完整性，通過後再保護上鏈"
+Given "Available Tools" contains: material.verifyFile@1.0.0 — 驗證檔案完整性 (input: filePath: string (required)),
+material.protectFile@1.0.0 — 保護檔案並建立稽核紀錄 (input: filePath: string (required); keepFile: boolean (optional))
+Correct plan:
+{"protocolVersion":"1.0","steps":[{"stepId":"S1","toolName":"material.verifyFile","nodeId":"node1","version":"1.0.0","input":{"filePath":"a.xml"},"dependsOn":[]},{"stepId":"S2","toolName":"material.protectFile","nodeId":"node1","version":"1.0.0","input":{"filePath":"a.xml","keepFile":true},"dependsOn":["S1"]}],"supervisorPolicy":"fail-fast"}
+
+Example 3 — nested structured input, computed from Current Time (a time-range field is
+always an object with "from"/"to" ISO 8601 strings — never "start"/"end", never a
+placeholder string like "now-24h"):
+Task: "取得過去24小時的稽核執行摘要"（assume Current Time above is 2026-08-24T12:00:00Z）
+Given "Available Tools" contains: orchestrator.getAuditSummary@1.0.0 — 取得稽核摘要
+(input: timeRange: object (required) — { from: string, to: string })
+Correct plan:
+{"protocolVersion":"1.0","steps":[{"stepId":"S1","toolName":"orchestrator.getAuditSummary","nodeId":"node1","version":"1.0.0","input":{"timeRange":{"from":"2026-08-23T12:00:00Z","to":"2026-08-24T12:00:00Z"}},"dependsOn":[]}],"supervisorPolicy":"fail-fast"}
 
 ## Rules
 1. toolName MUST be copied character-for-character from an "Available Tools"
@@ -320,7 +346,11 @@ Correct plan:
    machine.executeOrder step. Preserve its nodeId, machineId, and orderId.
    Words such as "接續", "然後", or "after" mean the later step dependsOn the
    preceding step.
-10. If the task is ambiguous, prefer "fail-fast" supervisorPolicy`;
+10. If the task is ambiguous, prefer "fail-fast" supervisorPolicy
+11. Any time-range input field is an object {"from": ISO8601, "to": ISO8601},
+    computed from "## Current Time" above — see Example 3. Never use
+    "start"/"end" as field names, and never emit a non-ISO placeholder like
+    "now" or "now-24h"`;
 }
 
 /**
