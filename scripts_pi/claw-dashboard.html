@@ -311,10 +311,11 @@
     background: radial-gradient(circle, rgba(61,141,232,0.15) 0%, transparent 70%);
     box-shadow: 0 0 18px rgba(61,141,232,0.3);
     display: flex; flex-direction: column; justify-content: center; align-items: center;
-    cursor: pointer; flex-shrink: 0; position: relative; z-index: 2;
+    cursor: grab; flex-shrink: 0; position: relative; z-index: 2;
+    transform: translate(var(--topo-x, 0px), var(--topo-y, 0px));
     transition: box-shadow .2s, transform .2s;
   }
-  .topo-hub:hover { box-shadow: 0 0 28px rgba(61,141,232,0.55); transform: scale(1.04); }
+  .topo-hub:hover { box-shadow: 0 0 28px rgba(61,141,232,0.55); transform: translate(var(--topo-x, 0px), var(--topo-y, 0px)) scale(1.04); }
   .topo-hub .hub-title { color: var(--accent); font-size: 13px; font-weight: 700; }
   .topo-hub .hub-sub   { color: var(--muted);  font-size: 10px; margin-top: 2px; }
   .topo-hub .hub-back  { color: var(--muted);  font-size: 9px;  margin-top: 4px; opacity: .7; }
@@ -327,10 +328,12 @@
     background: rgba(14,18,24,0.85); border: 1px solid var(--border);
     border-radius: 12px; padding: 11px 16px;
     width: 230px; display: flex; align-items: center; gap: 12px;
-    cursor: pointer; transition: border-color .2s, transform .15s, box-shadow .2s;
+    cursor: grab; transform: translate(var(--topo-x, 0px), var(--topo-y, 0px)); transition: border-color .2s, transform .15s, box-shadow .2s;
   }
-  .topo-node-card:hover { border-color: var(--green); transform: translateX(5px); box-shadow: 0 0 14px rgba(61,232,138,0.18); }
+  .topo-node-card:hover { border-color: var(--green); transform: translate(calc(var(--topo-x, 0px) + 5px), var(--topo-y, 0px)); box-shadow: 0 0 14px rgba(61,232,138,0.18); }
   .topo-node-card.active { border-color: var(--accent); background: rgba(61,141,232,0.08); box-shadow: 0 0 16px rgba(61,141,232,0.22); }
+  .topo-hub.dragging, .topo-node-card.dragging { cursor: grabbing; transition: none; }
+  .topo-hub.dragging:hover, .topo-node-card.dragging:hover { transform: translate(var(--topo-x, 0px), var(--topo-y, 0px)); }
 
   /* Status ring */
   .topo-node-ring { width: 36px; height: 36px; border-radius: 50%; border: 2px solid var(--green); display: flex; justify-content: center; align-items: center; background: var(--bg); flex-shrink: 0; }
@@ -376,11 +379,16 @@
   .topo-tree-row:last-child::after { display: none; }
   .topo-tree-row:hover { color: var(--text-bright); transform: translateX(3px); }
   .topo-tree-row.active { color: var(--accent); font-weight: 700; }
+  .topo-tree-row.is-child { margin: 3px 0 4px 14px; padding: 6px 8px; border: 1px solid rgba(61,141,232,.25); border-radius: 7px; background: rgba(61,141,232,.06); }
+  .topo-tree-row.is-child::before { left: -18px; top: -14px; width: 16px; height: 28px; border-top: 0; border-left: 1.5px solid rgba(61,141,232,.5); border-bottom: 1.5px solid rgba(61,141,232,.5); border-bottom-left-radius: 6px; }
+  .topo-tree-row.is-child::after { display: none; }
   .topo-tree-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 7px var(--green); }
   .topo-tree-dot.offline { background: var(--red); box-shadow: 0 0 7px var(--red); }
   .topo-tree-dot.checking { background: var(--amber); box-shadow: 0 0 7px var(--amber); animation: pulse 1s infinite; }
   .topo-tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .topo-tree-meta { color: var(--muted); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .topo-tree-row.is-child .topo-tree-meta { display: block; margin: 2px 0 0; color: #7892ad; }
+  .topo-tree-child-tag { margin-left: 5px; padding: 1px 4px; border-radius: 4px; background: rgba(61,141,232,.16); color: var(--accent); font-size: 8px; vertical-align: 1px; }
   .topo-tree-empty { color: var(--muted); font-size: 12px; padding: 10px 0 0 0; }
 
   /* Zoom controls */
@@ -728,7 +736,7 @@ const TAB_NAMES = ['health', 'scripts', 'deploy', 'workflow', 'stream', 'curl'];
 const nodes = new Map(); // nodeId → { url, status, health, scripts }
 
 function saveNodes() {
-  const arr = [...nodes.entries()].map(([id, n]) => ({ id, url: n.url }));
+  const arr = [...nodes.entries()].filter(([, n]) => !n.logical).map(([id, n]) => ({ id, url: n.url }));
   localStorage.setItem('claw_nodes', JSON.stringify(arr));
 }
 
@@ -917,6 +925,7 @@ function setView(view) {
 }
 
 function enterTopology() {
+  void loadAccountingCapabilities().catch(() => {});
   setView('topology');
   renderNodeList();
   requestAnimationFrame(drawTopoLines);
@@ -932,6 +941,7 @@ function showLanding() {
 }
 
 async function refreshAll() {
+  await loadAccountingCapabilities().catch(() => {});
   for (const id of nodes.keys()) await checkNode(id);
 }
 
@@ -946,7 +956,19 @@ function renderNodeList() {
   void canvas.offsetWidth;
   canvas.classList.add('topo-animating');
 
-  const entries = [...nodes.entries()];
+  const depthOf = (id, seen = new Set()) => {
+    if (seen.has(id)) return 0;
+    seen.add(id);
+    const parentId = nodes.get(id)?.parentNodeId;
+    return parentId && nodes.has(parentId) ? 1 + depthOf(parentId, seen) : 0;
+  };
+  const pathOf = (id, seen = new Set()) => {
+    if (seen.has(id)) return id;
+    seen.add(id);
+    const parentId = nodes.get(id)?.parentNodeId;
+    return parentId && nodes.has(parentId) ? `${pathOf(parentId, seen)}\0${id}` : id;
+  };
+  const entries = [...nodes.entries()].sort(([a], [b]) => pathOf(a).localeCompare(pathOf(b)));
   const sc = s => s === 'online' ? 'online' : s === 'offline' ? 'offline' : 'checking';
   const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
@@ -962,7 +984,8 @@ function renderNodeList() {
         const sub    = urlObj ? `${urlObj.hostname}:${urlObj.port || '80'}` : node.url;
         const isActive = id === activeNodeId;
         const animStyle = node.status === 'checking' ? ' style="animation:pulse 1s infinite"' : '';
-        return `<div class="topo-node-card${isActive ? ' active' : ''}" onclick="selectNode('${id}')">
+        const position = topoCardPositions.get(id) ?? { x: 0, y: 0 };
+        return `<div class="topo-node-card${isActive ? ' active' : ''}" data-node-id="${esc(id)}" data-parent-id="${esc(node.parentNodeId || '')}" style="margin-left:${depthOf(id) * 88}px;--topo-x:${position.x}px;--topo-y:${position.y}px" onclick="selectNode('${id}')">
           <div class="topo-node-ring ${status}">
             <div class="topo-node-dot ${status}"${animStyle}></div>
           </div>
@@ -985,22 +1008,26 @@ function renderNodeList() {
         <div class="topo-tree-rows">
         ${entries.map(([id, node]) => {
           const status = sc(node.status);
+          const depth = depthOf(id);
+          const isChild = depth > 0;
           const alias = nodeAliases.get(id);
           const urlObj = parseUrl(node.url);
           const sub = urlObj ? `${urlObj.hostname}:${urlObj.port || '80'}` : node.url;
           const isActive = id === activeNodeId;
           const label = alias ? `${id} / ${alias}` : id;
-          return `<div class="topo-tree-row${isActive ? ' active' : ''}" onclick="selectNode('${id}')" title="${esc(node.url)}">
+          const meta = isChild ? `via ${node.parentNodeId} · ${node.scripts?.length || 0} scripts` : sub;
+          return `<div class="topo-tree-row${isActive ? ' active' : ''}${isChild ? ' is-child' : ''}" style="margin-left:${depth * 14}px" onclick="selectNode('${id}')" title="${esc(node.url)}">
             <span class="topo-tree-dot ${status}"></span>
-            <span class="topo-tree-label">${esc(label)}<span class="topo-tree-meta">${esc(sub)}</span></span>
+            <span class="topo-tree-label">${esc(label)}${isChild ? `<span class="topo-tree-child-tag">L${depth + 2}</span>` : ''}<span class="topo-tree-meta">${esc(meta)}</span></span>
             <span>${isActive ? '*' : ''}</span>
           </div>`;
         }).join('')}
         </div>
       </div>`;
 
+  const hubPosition = topoCardPositions.get('__hub__') ?? { x: 0, y: 0 };
   canvas.innerHTML = `
-    <div class="topo-hub" id="topoHub" ${hubClickAttr}>
+    <div class="topo-hub" id="topoHub" style="--topo-x:${hubPosition.x}px;--topo-y:${hubPosition.y}px" ${hubClickAttr}>
       <span class="hub-title">CLAW</span>
       <span class="hub-sub">dashboard</span>
       ${hubBack}
@@ -1026,16 +1053,24 @@ function drawTopoLines() {
   const isH = canvas.dataset.layout === 'h';
   const cr  = canvas.getBoundingClientRect();
   const hr  = hub.getBoundingClientRect();
+  const scale = topoTx.s;
+  const x = value => (value - cr.left) / scale;
+  const y = value => (value - cr.top) / scale;
 
   // Hub connection point
-  const hx = isH ? hr.right  - cr.left : hr.left + hr.width  / 2 - cr.left;
-  const hy = isH ? hr.top    + hr.height / 2 - cr.top : hr.bottom - cr.top;
+  const hx = isH ? x(hr.right) : x(hr.left + hr.width / 2);
+  const hy = isH ? y(hr.top + hr.height / 2) : y(hr.bottom);
 
   const lines = [];
+  const cardsById = new Map([...cards].map(card => [card.dataset.nodeId, card]));
   cards.forEach(card => {
     const r = card.getBoundingClientRect();
-    const cx = isH ? r.left - cr.left : hr.left + hr.width / 2 - cr.left;
-    const cy = isH ? r.top  + r.height / 2 - cr.top : r.top - cr.top;
+    const parent = cardsById.get(card.dataset.parentId);
+    const source = parent?.getBoundingClientRect() ?? hr;
+    const sx = isH ? x(source.right) : x(source.left + source.width / 2);
+    const sy = isH ? y(source.top + source.height / 2) : y(source.bottom);
+    const cx = isH ? x(r.left) : x(r.left + r.width / 2);
+    const cy = isH ? y(r.top + r.height / 2) : y(r.top);
 
     const isActive = card.classList.contains('active');
     const dot = card.querySelector('.topo-node-dot');
@@ -1047,11 +1082,11 @@ function drawTopoLines() {
 
     let path;
     if (isH) {
-      const cpX = (hx + cx) / 2;
-      path = `M${hx},${hy} C${cpX},${hy} ${cpX},${cy} ${cx},${cy}`;
+      const cpX = (sx + cx) / 2;
+      path = `M${sx},${sy} C${cpX},${sy} ${cpX},${cy} ${cx},${cy}`;
     } else {
-      const cpY = (hy + cy) / 2;
-      path = `M${hx},${hy} C${hx},${cpY} ${cx},${cpY} ${cx},${cy}`;
+      const cpY = (sy + cy) / 2;
+      path = `M${sx},${sy} C${sx},${cpY} ${cx},${cpY} ${cx},${cy}`;
     }
     lines.push(`<path d="${path}" fill="none" stroke="${col}" stroke-width="${sw}" ${dash}/>`);
   });
@@ -1078,6 +1113,9 @@ function renderTopologySidebar(svg) { /* no-op */ void svg; }
 // ── Topology Zoom / Pan ───────────────────────────────────────────────────────
 let topoTx = { x: 0, y: 0, s: 1 };
 let topoDragState = { on: false, sx: 0, sy: 0, tx: 0, ty: 0 };
+const topoCardPositions = new Map();
+let topoCardDrag = null;
+let topoSuppressClick = false;
 
 function applyTopoTx() {
   const c = document.getElementById('topoCanvas');
@@ -1091,6 +1129,41 @@ function topoZoomReset() { topoTx = { x: 0, y: 0, s: 1 }; applyTopoTx(); }
 function initTopoInteraction() {
   const vp = document.getElementById('topoViewport');
   if (!vp) return;
+
+  // Drag individual topology cards; positions survive status-driven re-renders.
+  vp.addEventListener('pointerdown', e => {
+    const card = e.target.closest('.topo-node-card, .topo-hub');
+    if (!card || e.target.closest('.topo-node-actions, button, input, select')) return;
+    const key = card.id === 'topoHub' ? '__hub__' : card.dataset.nodeId;
+    const position = topoCardPositions.get(key) ?? { x: 0, y: 0 };
+    topoCardDrag = { card, key, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, x: position.x, y: position.y, moved: false };
+    card.setPointerCapture?.(e.pointerId);
+    card.classList.add('dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('pointermove', e => {
+    if (!topoCardDrag || e.pointerId !== topoCardDrag.pointerId) return;
+    const dx = (e.clientX - topoCardDrag.startX) / topoTx.s;
+    const dy = (e.clientY - topoCardDrag.startY) / topoTx.s;
+    topoCardDrag.moved ||= Math.hypot(dx, dy) > 3;
+    const position = { x: topoCardDrag.x + dx, y: topoCardDrag.y + dy };
+    topoCardPositions.set(topoCardDrag.key, position);
+    topoCardDrag.card.style.setProperty('--topo-x', `${position.x}px`);
+    topoCardDrag.card.style.setProperty('--topo-y', `${position.y}px`);
+    drawTopoLines();
+  });
+  window.addEventListener('pointerup', e => {
+    if (!topoCardDrag || e.pointerId !== topoCardDrag.pointerId) return;
+    topoCardDrag.card.classList.remove('dragging');
+    topoSuppressClick = topoCardDrag.moved;
+    topoCardDrag = null;
+  });
+  vp.addEventListener('click', e => {
+    if (!topoSuppressClick) return;
+    topoSuppressClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
 
   // Mouse-wheel zoom (centred on cursor)
   vp.addEventListener('wheel', e => {
@@ -1139,7 +1212,7 @@ function initTopoInteraction() {
         x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
         y: (e.touches[0].clientY + e.touches[1].clientY) / 2
       };
-    } else if (e.touches.length === 1) {
+    } else if (e.touches.length === 1 && !e.target.closest('.topo-node-card, .topo-hub')) {
       topoDragState = { on: true, sx: e.touches[0].clientX, sy: e.touches[0].clientY, tx: topoTx.x, ty: topoTx.y };
     }
   }, { passive: true });
@@ -1536,7 +1609,11 @@ async function runScriptInline(nodeId, scriptName) {
       body: JSON.stringify({ scriptName, params }),
       timeout: 35000,
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; }
+    catch { throw new Error(`Node 回傳非 JSON（HTTP ${res.status}）：${text.slice(0, 120)}`); }
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     renderResult(resultEl, data, Date.now() - t0, traceId, s.renderHint);
   } catch (e) {
     if (resultEl) resultEl.innerHTML = `<div class="result-box"><div style="color:var(--red)">${e.message}</div></div>`;
@@ -2969,7 +3046,27 @@ async function loadAccountingCapabilities() {
     status: node.status === 'online' ? 'online' : 'offline',
     canInstall: node.canInstall === true,
     resources: Array.isArray(node.resources) ? node.resources : [],
+    agentUrl: typeof node.agentUrl === 'string' ? node.agentUrl : '',
+    parentNodeId: typeof node.parentNodeId === 'string' ? node.parentNodeId : '',
+    routeType: node.routeType || '',
   })).filter(node => node.nodeId);
+  const logicalIds = new Set(accountingCapabilities.filter(node => node.parentNodeId).map(node => node.nodeId));
+  for (const [nodeId, node] of nodes) {
+    if (node.logical && !logicalIds.has(nodeId)) nodes.delete(nodeId);
+  }
+  accountingCapabilities.filter(node => node.parentNodeId && node.agentUrl).forEach(node => {
+    const existing = nodes.get(node.nodeId) || {};
+    nodes.set(node.nodeId, {
+      ...existing,
+      url: node.agentUrl,
+      status: node.status,
+      health: existing.health || { nodeId: node.nodeId, status: node.status, parentNodeId: node.parentNodeId, routeType: node.routeType },
+      scripts: node.resources,
+      parentNodeId: node.parentNodeId,
+      logical: true,
+    });
+  });
+  renderNodeList();
   return accountingCapabilities;
 }
 

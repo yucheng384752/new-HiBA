@@ -19,7 +19,7 @@
  *   GET    /health                     → { status }
  */
 import http from 'node:http';
-import { createHash } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -53,6 +53,7 @@ const store = new Map([
 const nodeRegistry = new Map();
 const PROTOCOL_VERSION = '1.0';
 const NODE_LEASE_MS = Number(process.env.NODE_LEASE_MS ?? 30_000);
+const HIBA_RELAY_TOKEN = process.env.HIBA_RELAY_TOKEN ?? '';
 const catalogDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts_pi', 'deploy_http', 'scripts');
 
 /** @type {Array<{anchoredAt: string, traceId: string, records: unknown[]}>} */
@@ -67,7 +68,7 @@ let blockchainBlockNumber = 1;
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-Trace-Id, X-Agent-Id, X-Depth',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Trace-Id, X-Agent-Id, X-Depth, X-Parent-Registration-Token, X-Node-Approval-Token',
 };
 
 function reply(res, status, body) {
@@ -105,6 +106,13 @@ function sha256Hex(value) {
   return createHash('sha256').update(value).digest('hex');
 }
 
+function tokenMatches(value) {
+  if (!HIBA_RELAY_TOKEN || typeof value !== 'string') return false;
+  const supplied = Buffer.from(value);
+  const expected = Buffer.from(HIBA_RELAY_TOKEN);
+  return supplied.length === expected.length && timingSafeEqual(supplied, expected);
+}
+
 function txHashFor(scope, payload) {
   return `0x${sha256Hex(`${scope}:${JSON.stringify(payload)}`)}`;
 }
@@ -120,6 +128,48 @@ async function fetchJson(url, options = {}) {
   return { res, body };
 }
 
+let syncingRelayChildren = false;
+async function syncRelayChildren() {
+  if (syncingRelayChildren || !HIBA_RELAY_TOKEN) return;
+  syncingRelayChildren = true;
+  try {
+    const parents = [...nodeRegistry.entries()].filter(([, reg]) => reg.agentUrl && !reg.parentNodeId && nodeStatus(reg) === 'online');
+    await Promise.all(parents.map(async ([parentNodeId, parent]) => {
+      try {
+        const { res, body } = await fetchJson(`${parent.agentUrl}/children/registrations`, {
+          headers: { 'X-Parent-Registration-Token': HIBA_RELAY_TOKEN }, timeoutMs: 4_000,
+        });
+        if (!res.ok || body?.nodeId !== parentNodeId || !Array.isArray(body?.children)) return;
+        for (const child of body.children) {
+          if (typeof child?.nodeId !== 'string' || !child.nodeId || child.nodeId === parentNodeId || child.parentNodeId !== parentNodeId) continue;
+          const existing = nodeRegistry.get(child.nodeId);
+          const agentUrl = `${parent.agentUrl}/children/${encodeURIComponent(child.nodeId)}`;
+          const lastSeenAt = child.status === 'online'
+            ? new Date().toISOString()
+            : typeof child.lastSeenAt === 'string' && Number.isFinite(Date.parse(child.lastSeenAt))
+              ? child.lastSeenAt : new Date().toISOString();
+          nodeRegistry.set(child.nodeId, {
+            agentUrl,
+            registeredAt: existing?.registeredAt ?? new Date().toISOString(),
+            lastSeenAt,
+            status: child.status === 'online' ? 'online' : 'offline',
+            connectionId: existing?.connectionId ?? sha256Hex(`${child.nodeId}:${agentUrl}:${Date.now()}`).slice(0, 16),
+            canInstall: false,
+            parentNodeId,
+            routeType: 'parent-relay',
+            connectionStatus: existing?.connectionStatus === 'approved' ? 'approved' : 'pending_approval',
+            attestationMode: ['tpm2', 'software', 'demo', 'none'].includes(child.attestationMode) ? child.attestationMode : 'none',
+            tpmVerified: false,
+          });
+          if (Array.isArray(child.resources)) store.set(child.nodeId, child.resources);
+        }
+      } catch { /* parent may not support relay discovery yet */ }
+    }));
+  } finally {
+    syncingRelayChildren = false;
+  }
+}
+
 function openNodeChannel(nodeId, agentUrl) {
   const now = new Date().toISOString();
   return {
@@ -133,6 +183,7 @@ function openNodeChannel(nodeId, agentUrl) {
 
 function nodeStatus(reg) {
   if (!reg?.lastSeenAt) return 'offline';
+  if (reg.connectionStatus === 'pending_approval') return 'offline';
   return Date.now() - Date.parse(reg.lastSeenAt) <= NODE_LEASE_MS ? 'online' : 'offline';
 }
 
@@ -279,6 +330,7 @@ const server = http.createServer(async (req, res) => {
 
     // GET /api/nodes → full list with address + resources
     if (method === 'GET' && urlPath === '/api/nodes') {
+      await syncRelayChildren();
       const all = [...new Set([...nodeRegistry.keys(), ...store.keys()])].map(nodeId => ({
         protocolVersion: PROTOCOL_VERSION,
         nodeId,
@@ -311,6 +363,10 @@ const server = http.createServer(async (req, res) => {
         status: nodeStatus(reg),
         lastSeenAt: reg.lastSeenAt,
         canInstall: reg.canInstall ?? false,
+        parentNodeId: reg.parentNodeId ?? null,
+        connectionStatus: reg.connectionStatus ?? 'approved',
+        attestationMode: reg.attestationMode ?? null,
+        tpmVerified: reg.tpmVerified ?? null,
         tools: (store.get(nodeId) ?? []).map(tool => ({ name: tool.name, version: tool.version ?? '1.0.0' })),
       });
       return;
@@ -336,17 +392,45 @@ const server = http.createServer(async (req, res) => {
         replyError(res, 400, 'REQUEST_INVALID', '"agentUrl" (string) is required');
         return;
       }
+      let agentUrl;
+      try {
+        agentUrl = new URL(body.agentUrl);
+        if (!['http:', 'https:'].includes(agentUrl.protocol)) throw new Error('unsupported protocol');
+      } catch {
+        replyError(res, 400, 'REQUEST_INVALID', '"agentUrl" must be an HTTP(S) URL');
+        return;
+      }
 
-      const { res: healthRes, body: health } = await fetchJson(`${body.agentUrl}/health`);
+      const parentNodeId = body.parentNodeId;
+      const forwarded = parentNodeId !== undefined;
+      const attestationMode = body.attestationMode ?? 'none';
+      if (forwarded && (typeof parentNodeId !== 'string' || !parentNodeId || parentNodeId === nodeId)) {
+        replyError(res, 400, 'REQUEST_INVALID', '"parentNodeId" must identify a different node');
+        return;
+      }
+      if (forwarded && !['tpm2', 'software', 'demo', 'none'].includes(attestationMode)) {
+        replyError(res, 400, 'REQUEST_INVALID', '"attestationMode" is invalid');
+        return;
+      }
+      if (forwarded && !tokenMatches(req.headers['x-parent-registration-token'])) {
+        replyError(res, HIBA_RELAY_TOKEN ? 401 : 503, HIBA_RELAY_TOKEN ? 'UNAUTHORIZED' : 'REGISTRATION_DISABLED', HIBA_RELAY_TOKEN ? 'Invalid parent registration token' : 'HIBA_RELAY_TOKEN is not configured');
+        return;
+      }
+
+      const { res: healthRes, body: health } = await fetchJson(`${agentUrl.toString().replace(/\/$/, '')}/health`);
       if (!healthRes.ok) {
         replyError(res, 502, 'NODE_OFFLINE', `Node health check failed: HTTP ${healthRes.status}`);
+        return;
+      }
+      if (health?.nodeId !== nodeId) {
+        replyError(res, 409, 'NODE_IDENTITY_MISMATCH', `Node health reports '${health?.nodeId ?? 'unknown'}', expected '${nodeId}'`);
         return;
       }
 
       let resources = Array.isArray(body.resources) ? body.resources : null;
       let canInstall = body.canInstall === true;
       if (!resources) {
-        const scripts = await fetchJson(`${body.agentUrl}/scripts`).catch(() => null);
+        const scripts = await fetchJson(`${agentUrl.toString().replace(/\/$/, '')}/scripts`).catch(() => null);
         if (scripts?.res.ok && Array.isArray(scripts.body?.scripts)) {
           resources = scripts.body.scripts.map(tool => ({ name: tool.name, version: tool.version ?? '1.0.0', type: 'tool' }));
           canInstall = true;
@@ -354,18 +438,47 @@ const server = http.createServer(async (req, res) => {
       }
       if (resources) store.set(nodeId, resources);
 
-      const channel = { ...openNodeChannel(nodeId, body.agentUrl), canInstall };
+      const channel = {
+        ...openNodeChannel(nodeId, agentUrl.toString().replace(/\/$/, '')),
+        canInstall,
+        ...(forwarded ? {
+          parentNodeId,
+          connectionStatus: nodeRegistry.get(nodeId)?.connectionStatus === 'approved' ? 'approved' : 'pending_approval',
+          attestationMode,
+          routeType: body.routeType === 'parent-relay' ? 'parent-relay' : 'forwarded',
+          // Forwarded claims are never sufficient to prove TPM ownership.
+          tpmVerified: false,
+        } : {}),
+      };
       nodeRegistry.set(nodeId, channel);
       reply(res, 200, {
         protocolVersion: PROTOCOL_VERSION,
         nodeId,
         ...channel,
+        status: nodeStatus(channel),
         health,
         endpoints: {
           heartbeat: `/api/nodes/${encodeURIComponent(nodeId)}/heartbeat`,
           update: `/api/nodes/${encodeURIComponent(nodeId)}/update`,
         },
       });
+      return;
+    }
+
+    const nodeApproveMatch = urlPath.match(/^\/api\/nodes\/([^/]+)\/approve$/);
+    if (method === 'POST' && nodeApproveMatch) {
+      if (!tokenMatches(req.headers['x-node-approval-token'])) {
+        replyError(res, HIBA_RELAY_TOKEN ? 401 : 503, HIBA_RELAY_TOKEN ? 'UNAUTHORIZED' : 'APPROVAL_DISABLED', HIBA_RELAY_TOKEN ? 'Invalid node approval token' : 'HIBA_RELAY_TOKEN is not configured');
+        return;
+      }
+      const nodeId = decodeURIComponent(nodeApproveMatch[1]);
+      const reg = nodeRegistry.get(nodeId);
+      if (!reg?.parentNodeId) {
+        replyError(res, 404, 'RESOURCE_NOT_FOUND', `Forwarded node '${nodeId}' not registered`);
+        return;
+      }
+      reg.connectionStatus = 'approved';
+      reply(res, 200, { protocolVersion: PROTOCOL_VERSION, nodeId, ...reg, status: nodeStatus(reg) });
       return;
     }
 
@@ -377,9 +490,13 @@ const server = http.createServer(async (req, res) => {
         replyError(res, 404, 'RESOURCE_NOT_FOUND', `Node '${nodeId}' not registered`);
         return;
       }
+      if (reg.parentNodeId && !tokenMatches(req.headers['x-parent-registration-token'])) {
+        replyError(res, 401, 'UNAUTHORIZED', 'Invalid parent registration token');
+        return;
+      }
       reg.lastSeenAt = new Date().toISOString();
       reg.status = 'online';
-      reply(res, 200, { nodeId, ...reg });
+      reply(res, 200, { nodeId, ...reg, status: nodeStatus(reg) });
       return;
     }
 
@@ -431,7 +548,7 @@ const server = http.createServer(async (req, res) => {
           replyError(res, 404, 'RESOURCE_NOT_FOUND', `Node '${nodeId}' not registered`);
           return;
         }
-        reply(res, 200, { protocolVersion: PROTOCOL_VERSION, nodeId, ...reg, resources: store.get(nodeId) ?? [] });
+        reply(res, 200, { protocolVersion: PROTOCOL_VERSION, nodeId, ...reg, status: nodeStatus(reg), resources: store.get(nodeId) ?? [] });
         return;
       }
 
@@ -513,6 +630,8 @@ const server = http.createServer(async (req, res) => {
 
 const PORT = process.env.PORT ?? 9090;
 server.listen(PORT, () => {
+  void syncRelayChildren();
+  setInterval(syncRelayChildren, 5_000).unref();
   console.log(`[accounting] http://localhost:${PORT}`);
   console.log(`[accounting] nodes: ${[...store.keys()].join(', ')}`);
 });
