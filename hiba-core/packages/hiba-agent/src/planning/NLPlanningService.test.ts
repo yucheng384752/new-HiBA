@@ -331,6 +331,36 @@ describe('NLPlanningService', () => {
     expect(plannerLLM.complete).not.toHaveBeenCalled();
   });
 
+  it('rejects a malformed run result instead of forwarding it to the LLM', async () => {
+    const plannerLLM = makeLLM(validPlanJson);
+    const summaryLLM = makeLLM({ steps: [{ stepId: 'S1', summary: 'n/a' }] });
+    const svc = new NLPlanningService(plannerLLM, makeAccounting(), { summaryLLM });
+
+    // "run" is unknown at the API boundary (POST /api/summarize forwards the
+    // raw HTTP body) -- a step missing toolName must not reach the LLM prompt.
+    await expect(svc.summarize('task', { steps: [{ stepId: 'S1', nodeId: 'node1' }] }))
+      .rejects.toThrow(/Invalid execution run result/);
+    expect(summaryLLM.complete).not.toHaveBeenCalled();
+  });
+
+  it('truncates an oversized step result instead of dumping it whole into the LLM input', async () => {
+    const plannerLLM = makeLLM(validPlanJson);
+    const summaryLLM = makeLLM({ steps: [{ stepId: 'S1', summary: '完成' }] });
+    const svc = new NLPlanningService(plannerLLM, makeAccounting(), { summaryLLM });
+    const hugeOutput = 'x'.repeat(5_000);
+
+    await svc.summarize('task', {
+      steps: [{
+        stepId: 'S1', nodeId: 'node1', toolName: 'machine.queryStatus',
+        result: { success: true, output: hugeOutput },
+      }],
+    });
+
+    const sentTask = summaryLLM.complete.mock.calls[0]![0].task;
+    expect(sentTask).toContain('_truncated');
+    expect(sentTask).not.toContain(hugeOutput);
+  });
+
   it('fills default version "1.0.0" when LLM omits it', async () => {
     const planWithoutVersion = {
       steps: [
