@@ -1,5 +1,5 @@
 import { describe, it, expect, jest, afterEach } from '@jest/globals';
-import { HttpLLMClient, summarizeInputSchema, repairBracketBalance } from './HttpLLMClient';
+import { HttpLLMClient, summarizeInputSchema, repairBracketBalance, buildPlanJsonSchema } from './HttpLLMClient';
 import type { LLMPayload } from './NLPlanningService';
 import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
 import type { ToolSpec } from '../types/hiba.types';
@@ -84,6 +84,48 @@ describe('repairBracketBalance', () => {
 
   it('drops a stray ")" that has nothing open left to close', () => {
     expect(repairBracketBalance('{})')).toBe('{}');
+  });
+});
+
+// ── buildPlanJsonSchema ──────────────────────────────────────────────────────
+// Turns on Ollama's grammar-constrained decoding: toolName must be one of the
+// tools actually on offer, so a hallucinated name is rejected at the token
+// level instead of caught after the fact by validatePlan's TOOL_NOT_FOUND retry.
+
+function tool(name: `env.${string}` | `machine.${string}`): ToolSpec {
+  return {
+    protocolVersion: HIBA_PROTOCOL_VERSION,
+    name,
+    version: '1.0.0',
+    description: name,
+    tags: ['env', 'read'],
+    inputSchema: { type: 'object', properties: {}, required: [], additionalProperties: false },
+    outputSchema: { type: 'object' },
+    permissions: [],
+    timeoutMs: 5000,
+  };
+}
+
+describe('buildPlanJsonSchema', () => {
+  it('restricts steps[].toolName to an enum of the supplied tool names', () => {
+    const schema = buildPlanJsonSchema([tool('machine.queryStatus'), tool('env.readSensor')]);
+    const steps = schema['properties'] as Record<string, any>;
+    expect(steps['steps'].items.properties.toolName).toEqual({
+      type: 'string',
+      enum: ['machine.queryStatus', 'env.readSensor'],
+    });
+  });
+
+  it('falls back to an unconstrained string when no tools are supplied', () => {
+    const schema = buildPlanJsonSchema([]);
+    const steps = schema['properties'] as Record<string, any>;
+    expect(steps['steps'].items.properties.toolName).toEqual({ type: 'string' });
+  });
+
+  it('constrains supervisorPolicy to the two valid values', () => {
+    const schema = buildPlanJsonSchema([]);
+    const props = schema['properties'] as Record<string, any>;
+    expect(props['supervisorPolicy']).toEqual({ type: 'string', enum: ['fail-fast', 'partial-success'] });
   });
 });
 
@@ -208,5 +250,56 @@ describe('HttpLLMClient malformed-JSON retry', () => {
 
     expect(callCount).toBe(2); // one retry attempt, then give up
     expect(rawJson).toBe('still not json{{{');
+  });
+});
+
+// ── HttpLLMClient ollama format wiring ──────────────────────────────────────
+
+describe('HttpLLMClient ollama format', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('sends the JSON Schema (not the bare string "json") as format, with the tool enum populated', async () => {
+    const payload: LLMPayload = {
+      task: 'do something',
+      resources: {},
+      nodes: [],
+      tools: [tool('machine.queryStatus')],
+    };
+
+    let capturedBody: { format: unknown } | undefined;
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      capturedBody = JSON.parse((init as RequestInit).body as string);
+      return new Response(JSON.stringify({ response: '{"steps":[]}' }));
+    });
+
+    const client = new HttpLLMClient('http://localhost:11434/api/generate', { format: 'ollama' });
+    await client.complete(payload);
+
+    expect(capturedBody!.format).not.toBe('json');
+    expect(capturedBody!.format).toEqual(buildPlanJsonSchema(payload.tools));
+  });
+
+  it('sends the same schema via response_format on the default openai-compatible path (LLM_FORMAT=openai in production)', async () => {
+    const payload: LLMPayload = {
+      task: 'do something',
+      resources: {},
+      nodes: [],
+      tools: [tool('machine.queryStatus')],
+    };
+
+    let capturedBody: { response_format: { type: string; json_schema: { schema: unknown } } } | undefined;
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      capturedBody = JSON.parse((init as RequestInit).body as string);
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"steps":[]}' } }] }));
+    });
+
+    // format defaults to 'openai' when omitted — this is what start.ts actually constructs in production.
+    const client = new HttpLLMClient('http://localhost:11434/v1/chat/completions', {});
+    await client.complete(payload);
+
+    expect(capturedBody!.response_format.type).toBe('json_schema');
+    expect(capturedBody!.response_format.json_schema.schema).toEqual(buildPlanJsonSchema(payload.tools));
   });
 });
