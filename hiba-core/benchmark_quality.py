@@ -4,20 +4,57 @@ import argparse
 import json
 import sys
 import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8")
 
+QUALITY_HISTORY_PATH = Path(__file__).parent / "training" / "quality-history.jsonl"
+
 SYSTEM = """You are a HiBA workflow planner. Use only the supplied Core Protocol v1 nodes and tools. Return only one ExecutionPlan JSON object. Tool names, versions, node IDs, input fields, and dependencies must exactly match the supplied context."""
 
 
-def query(url, model, row, timeout):
+def build_plan_json_schema(tools):
+    """Python port of HttpLLMClient.ts's buildPlanJsonSchema -- restricts
+    steps[].toolName to an enum of the tools actually on offer for this row,
+    so a hallucinated name is rejected by Ollama's grammar-constrained
+    decoding instead of just being scored wrong after the fact."""
+    tool_names = [tool["name"] for tool in tools]
+    tool_name_prop = {"type": "string", "enum": tool_names} if tool_names else {"type": "string"}
+    return {
+        "type": "object",
+        "properties": {
+            "protocolVersion": {"type": "string", "const": "1.0"},
+            "steps": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "stepId":    {"type": "string"},
+                        "toolName":  tool_name_prop,
+                        "nodeId":    {"type": "string"},
+                        "version":   {"type": "string"},
+                        "input":     {"type": "object"},
+                        "dependsOn": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["stepId", "toolName", "nodeId", "version", "input", "dependsOn"],
+                },
+            },
+            "supervisorPolicy": {"type": "string", "enum": ["fail-fast", "partial-success"]},
+            "error": {"type": "string"},
+        },
+        "required": ["protocolVersion", "steps", "supervisorPolicy"],
+    }
+
+
+def query(url, model, row, timeout, schema_format):
     prompt = f"Core Protocol v1 context:\n{row['input']}\n\nUser task:\n{row['instruction']}"
+    fmt = build_plan_json_schema(json.loads(row["input"])["tools"]) if schema_format else "json"
     body = json.dumps({
         "model": model,
         "system": SYSTEM,
         "prompt": prompt,
-        "format": "json",
+        "format": fmt,
         "stream": False,
         "options": {"temperature": 0},
     }).encode("utf-8")
@@ -31,9 +68,14 @@ def component_scores(actual, expected):
     if not isinstance(actual, dict):
         return dict.fromkeys(names, 0)
     actual_steps = actual.get("steps") if isinstance(actual.get("steps"), list) else []
+    # A malformed model output can put a non-dict element in steps[] (e.g. a bare
+    # string) -- real production validation (planStepSchema) would reject that
+    # outright, so treat it as an automatic step mismatch here instead of
+    # crashing on .get() below.
+    well_formed = all(isinstance(s, dict) for s in actual_steps)
     expected_steps = expected["steps"]
-    paired = list(zip(actual_steps, expected_steps))
-    same_count = len(actual_steps) == len(expected_steps)
+    paired = list(zip(actual_steps, expected_steps)) if well_formed else []
+    same_count = well_formed and len(actual_steps) == len(expected_steps)
     return {
         "schema": int(actual.get("protocolVersion") == "1.0" and same_count and actual.get("supervisorPolicy") == expected["supervisorPolicy"]),
         "tool": int(same_count and all(a.get("toolName") == e["toolName"] and a.get("version") == e["version"] for a, e in paired)),
@@ -49,12 +91,12 @@ def load_rows(path, limit):
     return rows[:limit] if limit else rows
 
 
-def benchmark(model, rows, url, timeout):
+def benchmark(model, rows, url, timeout, schema_format):
     totals = dict.fromkeys(("schema", "tool", "node", "input", "dependency", "exact"), 0)
     errors = 0
     for index, row in enumerate(rows, 1):
         try:
-            actual = json.loads(query(url, model, row, timeout))
+            actual = json.loads(query(url, model, row, timeout, schema_format))
         except Exception as error:
             errors += 1
             actual = None
@@ -63,8 +105,22 @@ def benchmark(model, rows, url, timeout):
             totals[name] += value
 
     count = len(rows)
+    mode = "schema" if schema_format else "json"
     summary = " ".join(f"{name}={totals[name] / count:.1%}" for name in totals)
-    print(f"{model}: cases={count} errors={errors} {summary}")
+    print(f"{model} [format={mode}]: cases={count} errors={errors} {summary}")
+
+    # Every benchmark run gets a permanent record -- not just terminal scrollback.
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "format_mode": mode,
+        "cases": count,
+        "errors": errors,
+        **{name: totals[name] / count for name in totals},
+    }
+    QUALITY_HISTORY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with QUALITY_HISTORY_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
 def main():
@@ -74,12 +130,16 @@ def main():
     parser.add_argument("--url", default="http://127.0.0.1:11434/api/generate")
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--schema-format", action="store_true",
+        help="Constrain toolName to an enum via Ollama's JSON-Schema format instead of the bare 'json' mode",
+    )
     args = parser.parse_args()
     rows = load_rows(args.dataset, args.limit)
     if not rows:
         raise SystemExit("evaluation dataset is empty")
     for model in args.models:
-        benchmark(model, rows, args.url, args.timeout)
+        benchmark(model, rows, args.url, args.timeout, args.schema_format)
 
 
 if __name__ == "__main__":
