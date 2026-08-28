@@ -62,7 +62,7 @@ export class HttpLLMClient implements LLMClient {
   ): Promise<{ raw: string; parsed: unknown }> {
     const body = this.options.format === 'ollama'
       ? this.ollamaBody(system, task, tools, previousInvalidOutput)
-      : this.openaiBody(system, task, previousInvalidOutput);
+      : this.openaiBody(system, task, tools, previousInvalidOutput);
 
     const res = await fetch(this.endpoint, {
       method: 'POST',
@@ -81,7 +81,7 @@ export class HttpLLMClient implements LLMClient {
     return { raw, parsed: tryParseJson(raw) };
   }
 
-  private openaiBody(system: string, task: string, previousInvalidOutput?: string) {
+  private openaiBody(system: string, task: string, tools: ToolSpec[], previousInvalidOutput?: string) {
     const messages = [
       { role: 'system', content: system },
       { role: 'user',   content: task   },
@@ -95,7 +95,11 @@ export class HttpLLMClient implements LLMClient {
     return {
       model: this.options.model ?? 'hiba-planner',
       messages,
-      response_format: { type: 'json_object' },
+      // OpenAI Structured Outputs (also honored by Ollama's OpenAI-compatible
+      // endpoint, and by vLLM — verified live against Ollama 0.32.9): same
+      // grammar-constrained decoding as ollamaBody's format, so this is the
+      // path production actually exercises by default (LLM_FORMAT=openai).
+      response_format: { type: 'json_schema', json_schema: { name: 'execution_plan', schema: buildPlanJsonSchema(tools) } },
       temperature: this.options.temperature ?? 0.1,
     };
   }

@@ -280,4 +280,26 @@ describe('HttpLLMClient ollama format', () => {
     expect(capturedBody!.format).not.toBe('json');
     expect(capturedBody!.format).toEqual(buildPlanJsonSchema(payload.tools));
   });
+
+  it('sends the same schema via response_format on the default openai-compatible path (LLM_FORMAT=openai in production)', async () => {
+    const payload: LLMPayload = {
+      task: 'do something',
+      resources: {},
+      nodes: [],
+      tools: [tool('machine.queryStatus')],
+    };
+
+    let capturedBody: { response_format: { type: string; json_schema: { schema: unknown } } } | undefined;
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      capturedBody = JSON.parse((init as RequestInit).body as string);
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"steps":[]}' } }] }));
+    });
+
+    // format defaults to 'openai' when omitted — this is what start.ts actually constructs in production.
+    const client = new HttpLLMClient('http://localhost:11434/v1/chat/completions', {});
+    await client.complete(payload);
+
+    expect(capturedBody!.response_format.type).toBe('json_schema');
+    expect(capturedBody!.response_format.json_schema.schema).toEqual(buildPlanJsonSchema(payload.tools));
+  });
 });
