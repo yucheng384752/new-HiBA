@@ -1,0 +1,59 @@
+### model
+model_name_or_path: meta-llama/Llama-3.1-8B-Instruct
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target: all
+
+### dataset
+dataset: hiba_workflow_v1
+dataset_dir: ./training
+template: llama3
+# v1c (cutoff_len:4608) ran ~95 min/optimization-step (2/45 steps in ~3h10m,
+# see plan_LLM_訓練清單.md §十八) -- far slower than any prior run. Checked
+# LLaMA-Factory 0.9.4's collator (data/collator.py) before assuming
+# cutoff_len was the lever: it uses HF's DataCollatorForSeq2Seq, which pads
+# dynamically to the longest example IN EACH BATCH, not statically to
+# cutoff_len. Real per-example lengths (min=3578, p50=3719, p90=3968,
+# max=3990) don't change just by lowering the ceiling, as long as it stays
+# above 3990 -- so this is expected to have little effect, kept anyway at
+# the user's explicit request to verify empirically rather than assume.
+# 4096 is v1's original cutoff_len (§10.5) -- NOT v1-optimized's 2048,
+# which sits below this data's real max (3990) and would silently truncate
+# examples (the exact failure mode §14.3 already flagged once).
+cutoff_len: 4096
+overwrite_cache: true
+preprocessing_num_workers: 1
+
+### output
+# New dir per project convention (v1b/v1c each got their own) -- v1c's
+# output_dir never got a checkpoint (stopped at step 2/45, save_steps: 5),
+# nothing there to preserve, but a fresh dir keeps run histories separable.
+output_dir: ./training/hiba-planner-v1c2-lora
+logging_dir: ./training/logs-v1c2
+logging_steps: 5
+save_steps: 5
+plot_loss: true
+overwrite_output_dir: true
+
+### train
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 0.0001
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+seed: 42
+
+### eval
+val_size: 0.1
+per_device_eval_batch_size: 2
+eval_strategy: steps
+eval_steps: 20
