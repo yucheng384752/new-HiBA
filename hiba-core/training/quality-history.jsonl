@@ -10,3 +10,5 @@
 {"timestamp": "2026-08-28T06:03:38.802472+00:00", "model": "hiba-planner:v1-optimized", "format_mode": "schema", "cases": 20, "errors": 0, "schema": 0.5, "tool": 0.35, "node": 0.05, "input": 0.05, "dependency": 0.45, "exact": 0.0}
 {"timestamp": "2026-08-28T20:42:56.733156+00:00", "model": "hiba-planner:v1-optimized", "format_mode": "schema", "cases": 64, "errors": 5, "schema": 0.625, "tool": 0.03125, "node": 0.03125, "input": 0.046875, "dependency": 0.609375, "exact": 0.0}
 {"timestamp": "2026-08-28T21:11:57.420406+00:00", "model": "hiba-planner:v1", "format_mode": "schema", "cases": 64, "errors": 5, "schema": 0.71875, "tool": 0.0, "node": 0.0, "input": 0.0, "dependency": 0.71875, "exact": 0.0}
+{"timestamp": "2026-08-29T08:38:29.061253+00:00", "model": "hiba-planner:v1-optimized", "format_mode": "schema", "cases": 10, "errors": 0, "schema": 0.7, "tool": 0.7, "node": 0.3, "input": 0.5, "dependency": 0.7, "exact": 0.2}
+{"timestamp": "2026-08-29T08:45:45.797660+00:00", "model": "hiba-planner:v1-optimized", "format_mode": "schema", "cases": 64, "errors": 0, "schema": 0.8125, "tool": 0.8125, "node": 0.375, "input": 0.453125, "dependency": 0.8125, "exact": 0.25}

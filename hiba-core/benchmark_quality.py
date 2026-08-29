@@ -46,24 +46,40 @@ def build_plan_json_schema(tools):
 
 
 def query(url, model, row, timeout, schema_format):
-    # `system`/`instruction` are now the exact production prompt shape
-    # (built by the real buildDefaultSystemPrompt(), see
-    # plan_LLM_訓練清單.md §十四) instead of this script's own
-    # hand-maintained raw-JSON-context format -- `context` (not sent to the
-    # model) still carries the structured {resources, nodes, tools} this
-    # function needs for schema-constrained decoding.
-    fmt = build_plan_json_schema(json.loads(row["context"])["tools"]) if schema_format else "json"
-    body = json.dumps({
-        "model": model,
-        "system": row["system"],
-        "prompt": row["instruction"],
-        "format": fmt,
-        "stream": False,
-        "options": {"temperature": 0},
-    }).encode("utf-8")
-    request = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+    # Uses Ollama's OpenAI-compatible endpoint (messages[] + response_format),
+    # the same request shape HttpLLMClient.ts's openaiBody() sends in
+    # production (LLM_FORMAT=openai, the default -- see §10.8). This used to
+    # go through the native /api/generate endpoint with a separate top-level
+    # "system" field instead, which silently drops that field for any model
+    # whose Modelfile TEMPLATE doesn't reference {{ .System }} -- confirmed
+    # for hiba-planner:v1-optimized (TEMPLATE is bare `{{ .Prompt }}`) via a
+    # marker-token test: prompt_eval_count=11 (system absent) on the native
+    # endpoint vs. the marker actually reaching the model on this endpoint.
+    # That silently invalidated every schema-format run made against this
+    # model between the format split landing (e5fa374) and this fix -- see
+    # plan_LLM_訓練清單.md §十五 correction. `system`/`instruction` are the
+    # exact production prompt shape (buildDefaultSystemPrompt(), §十四);
+    # `context` (not sent to the model) still carries {resources, nodes,
+    # tools} this function needs for schema-constrained decoding.
+    messages = [
+        {"role": "system", "content": row["system"]},
+        {"role": "user", "content": row["instruction"]},
+    ]
+    body = {"model": model, "messages": messages, "temperature": 0}
+    if schema_format:
+        tools = json.loads(row["context"])["tools"]
+        body["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "execution_plan", "schema": build_plan_json_schema(tools)},
+        }
+    else:
+        body["response_format"] = {"type": "json_object"}
+    request = urllib.request.Request(
+        url, data=json.dumps(body).encode("utf-8"), headers={"Content-Type": "application/json"},
+    )
     with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read())["response"].strip()
+        data = json.loads(response.read())
+        return data["choices"][0]["message"]["content"].strip()
 
 
 def component_scores(actual, expected):
@@ -130,7 +146,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("models", nargs="*", default=["hiba-planner:v1"])
     parser.add_argument("--dataset", type=Path, default=Path("training/data/hiba-v1-eval.jsonl"))
-    parser.add_argument("--url", default="http://127.0.0.1:11434/api/generate")
+    parser.add_argument("--url", default="http://127.0.0.1:11434/v1/chat/completions")
     parser.add_argument("--timeout", type=int, default=90)
     parser.add_argument("--limit", type=int)
     parser.add_argument(
