@@ -453,6 +453,10 @@
             "text"
           ]
         },
+        "summary": {
+          "type": "string",
+          "description": "內容類型與筆數的一句話摘要"
+        },
         "toolName": {
           "type": "string",
           "description": "正式 Tool 名稱，供稽核追蹤"
@@ -571,6 +575,10 @@
         "matched": {
           "type": "boolean",
           "description": "寫入內容與回讀是否一致"
+        },
+        "failReason": {
+          "type": "string",
+          "description": "probe 失敗原因；成功時不存在"
         },
         "toolName": {
           "type": "string",
