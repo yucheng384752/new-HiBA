@@ -362,6 +362,7 @@ export class AuditTrail implements AuditWriter {
     traceId?: string;
     subjectId?: string;
     eventType?: CriticalEventType;
+    since?: number;
   }): Promise<CriticalEventRecord[]> {
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -374,6 +375,10 @@ export class AuditTrail implements AuditWriter {
         clauses.push(`${column} = ?`);
         params.push(value);
       }
+    }
+    if (filter.since !== undefined) {
+      clauses.push('occurred_at >= ?');
+      params.push(new Date(filter.since).toISOString());
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db.prepare(`SELECT * FROM critical_events ${where} ORDER BY occurred_at ASC`).all(...params) as CriticalEventRow[];
