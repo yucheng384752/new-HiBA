@@ -195,6 +195,8 @@
   .history-item .hi-meta { color: var(--muted); font-size: 11px; }
   .history-item .hi-del { background: none; border: 1px solid var(--red); color: var(--red); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; }
   .history-item .hi-del:hover { background: rgba(248,81,73,.1); }
+  .history-item .hi-approve { background: none; border: 1px solid var(--green); color: var(--green); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; }
+  .history-item .hi-approve:hover { background: rgba(63,185,80,.1); }
 
   .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -677,6 +679,7 @@
       <div class="tab" data-tab="scripts" onclick="switchTab('scripts')">Script List</div>
       <div class="tab" data-tab="deploy" onclick="switchTab('deploy')">Deploy</div>
       <div class="tab" data-tab="workflow" onclick="switchTab('workflow')">Plan</div>
+      <div class="tab" data-tab="linetopo" onclick="switchTab('linetopo')">產線拓樸</div>
       <div class="tab" data-tab="stream" onclick="switchTab('stream')">Stream</div>
       <div class="tab" data-tab="curl" onclick="switchTab('curl')">Curl</div>
     </div>
@@ -702,6 +705,11 @@
         <div class="empty-state"><div class="icon">🧩</div>任務鏈已顯示於輸入框下方</div>
       </div>
 
+      <!-- Line Topology Tab（產線物理拓樸，非左側的節點網路拓樸） -->
+      <div class="tab-pane" id="tab-linetopo">
+        <div id="linetopoContent"><div class="empty-state"><div class="icon">🔗</div>載入中…</div></div>
+      </div>
+
       <!-- Stream Tab -->
       <div class="tab-pane" id="tab-stream">
         <div id="streamContent">
@@ -722,7 +730,7 @@
 // ── Constants ──────────────────────────────────────────────────────────────
 const AGENT_ID  = 'claw-dashboard';
 const LS_KEYS   = { favorites: 'claw_favorites', shellHistory: 'claw_shell_history' };
-const TAB_NAMES = ['health', 'scripts', 'deploy', 'workflow', 'stream', 'curl'];
+const TAB_NAMES = ['health', 'scripts', 'deploy', 'workflow', 'linetopo', 'stream', 'curl'];
 
 // ── State ──────────────────────────────────────────────────────────────────
 const nodes = new Map(); // nodeId → { url, status, health, scripts }
@@ -1206,6 +1214,7 @@ function switchTab(tab) {
   if (tab === 'deploy') renderDeploy();
   if (tab === 'curl') renderCurl();
   if (tab === 'workflow') renderWorkflow();
+  if (tab === 'linetopo') renderLineTopology();
   if (activeNodeId && tab === 'stream') renderStream();
 }
 
@@ -2996,6 +3005,125 @@ function buildPlanContext() {
     }
   }
   return lines.join('\n');
+}
+
+// ── Line Topology Tab（產線物理拓樸：上下游/站點順序，非上面「節點網路拓樸」）──
+// 規格：實作規格/plan()_LLM生成品質改善與輕量RAG檢索設計.md §四
+// API：hiba-agent AgentServer 的 /api/topology/edges，跟左側節點拓樸完全獨立。
+const TOPOLOGY_RELATIONS = ['upstream_of', 'downstream_of', 'backup_for', 'same_line'];
+let lineTopologyState = { approved: [], suggested: [] };
+
+async function loadTopologyEdges() {
+  const [approvedRes, suggestedRes] = await Promise.all([
+    safeFetch(`${workflowPlanningUrl}/api/topology/edges?status=approved`, { timeout: 8000 }),
+    safeFetch(`${workflowPlanningUrl}/api/topology/edges?status=suggested`, { timeout: 8000 }),
+  ]);
+  if (!approvedRes.ok || !suggestedRes.ok) {
+    throw new Error(`HTTP ${approvedRes.status}/${suggestedRes.status}`);
+  }
+  return { approved: await approvedRes.json(), suggested: await suggestedRes.json() };
+}
+
+function topoEdgeRow(edgeItem, actionHtml) {
+  const sourceLabel = edgeItem.source === 'audit_trail_inference' ? 'AuditTrail 自動偵測' : '人工維護';
+  const lineLabel = edgeItem.lineId ? ` · 產線 ${escapeHtml(edgeItem.lineId)}` : '';
+  return `
+    <div class="history-item">
+      <div>
+        <div class="hi-name">${escapeHtml(edgeItem.fromNodeId)} --${escapeHtml(edgeItem.relation)}--> ${escapeHtml(edgeItem.toNodeId)}</div>
+        <div class="hi-meta">${sourceLabel}${lineLabel}</div>
+      </div>
+      ${actionHtml}
+    </div>`;
+}
+
+async function renderLineTopology() {
+  const el = document.getElementById('linetopoContent');
+  el.innerHTML = '<div class="empty-state"><div class="icon">🔗</div>載入中…</div>';
+
+  try {
+    lineTopologyState = await loadTopologyEdges();
+  } catch (e) {
+    el.innerHTML = `<div class="deploy-form"><div style="color:var(--red)">載入失敗：${escapeHtml(e.message)}（確認 hiba-agent AgentServer 是否已啟動並設定 Planning URL）</div></div>`;
+    return;
+  }
+
+  const relationOptions = TOPOLOGY_RELATIONS.map(r => `<option value="${r}">${r}</option>`).join('');
+  const nodeIdOptions = [...nodes.keys()].map(id => `<option value="${escapeHtml(id)}">`).join('');
+
+  const suggestedHtml = lineTopologyState.suggested.length
+    ? lineTopologyState.suggested.map((edgeItem, i) => topoEdgeRow(
+        edgeItem, `<button class="hi-approve" onclick="approveTopologyEdge(${i})">核准</button>`,
+      )).join('')
+    : '<div class="empty-state" style="padding:20px 0"><div class="icon">✓</div>沒有待審核的拓樸邊</div>';
+
+  const approvedHtml = lineTopologyState.approved.length
+    ? lineTopologyState.approved.map(edgeItem => topoEdgeRow(edgeItem, '')).join('')
+    : '<div class="empty-state" style="padding:20px 0"><div class="icon">📭</div>尚未設定任何拓樸邊</div>';
+
+  el.innerHTML = `
+    <div class="deploy-form">
+      <h3>新增拓樸邊（人工維護，新增後立即生效）</h3>
+      <div class="deploy-meta">
+        <div><label>From Node ID</label><input id="topoFromNode" list="topoNodeIds" placeholder="node1"></div>
+        <div><label>Relation</label><select id="topoRelation">${relationOptions}</select></div>
+        <div><label>To Node ID</label><input id="topoToNode" list="topoNodeIds" placeholder="node2"></div>
+        <div><label>產線 ID（選填）</label><input id="topoLineId" placeholder="line-A"></div>
+      </div>
+      <datalist id="topoNodeIds">${nodeIdOptions}</datalist>
+      <button class="deploy-btn" onclick="addTopologyEdge()">新增</button>
+    </div>
+    <div class="deploy-history">
+      <h4>待審核（AuditTrail 自動偵測，需人工核准才會出現在 plan() 檢索結果）</h4>
+      ${suggestedHtml}
+    </div>
+    <div class="deploy-history">
+      <h4>已核准</h4>
+      ${approvedHtml}
+    </div>`;
+}
+
+async function addTopologyEdge() {
+  const fromNodeId = document.getElementById('topoFromNode').value.trim();
+  const relation    = document.getElementById('topoRelation').value;
+  const toNodeId    = document.getElementById('topoToNode').value.trim();
+  const lineId      = document.getElementById('topoLineId').value.trim();
+  if (!fromNodeId || !toNodeId) { toast('From/To Node ID 必填', 'var(--amber)'); return; }
+
+  try {
+    const res = await safeFetch(`${workflowPlanningUrl}/api/topology/edges`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromNodeId, relation, toNodeId, ...(lineId ? { lineId } : {}) }),
+      timeout: 8000,
+    });
+    if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0, 120)}`); }
+    toast('✓ 拓樸邊已新增', 'var(--green)');
+    renderLineTopology();
+  } catch (e) {
+    toast(`新增失敗：${e.message}`, 'var(--red)');
+  }
+}
+
+async function approveTopologyEdge(index) {
+  const edgeItem = lineTopologyState.suggested[index];
+  if (!edgeItem) return;
+
+  try {
+    const res = await safeFetch(`${workflowPlanningUrl}/api/topology/edges/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Id': AGENT_ID },
+      body: JSON.stringify({
+        fromNodeId: edgeItem.fromNodeId, relation: edgeItem.relation, toNodeId: edgeItem.toNodeId,
+      }),
+      timeout: 8000,
+    });
+    if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0, 120)}`); }
+    toast('✓ 已核准', 'var(--green)');
+    renderLineTopology();
+  } catch (e) {
+    toast(`核准失敗：${e.message}`, 'var(--red)');
+  }
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────
