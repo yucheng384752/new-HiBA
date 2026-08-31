@@ -7,8 +7,10 @@ import { TrustRegistry }        from '../trust/TrustRegistry';
 import { OrchestratorRunner, parseNodeAddresses } from './OrchestratorRunner';
 import { AgentServer }          from './AgentServer';
 import { WorkflowStore }        from './WorkflowStore';
+import { TopologyRegistry }     from '../topology/TopologyRegistry';
 import { registerHibaTools }    from '../tools/hiba.tools';
 import { registerAuditTools }   from '../tools/audit.tools';
+import { registerContextRetrievalTools } from '../tools/context.tools';
 import type { ToolPermission }  from '../types/hiba.types';
 
 const env = (key: string, fallback: string): string => process.env[key] ?? fallback;
@@ -51,9 +53,11 @@ async function main(): Promise<void> {
   const toolbox  = new HiBAToolbox({ auditWriter: audit, permissions });
   const registry = new TrustRegistry(env('TRUST_DB', './hiba-trust.db'));
   const workflowStore = new WorkflowStore(env('WORKFLOW_DB', './hiba-workflows.db'));
+  const topology = new TopologyRegistry(env('TOPOLOGY_DB', './hiba-topology.db'));
 
   registerHibaTools(toolbox);
   registerAuditTools(toolbox, audit);
+  registerContextRetrievalTools(toolbox, { topology, audit, accounting });
 
   const planning = new NLPlanningService(llm, accounting, { toolbox, summaryLLM });
 
@@ -76,6 +80,7 @@ async function main(): Promise<void> {
     orchestrator,
     workflowStore,
     auditTrail: audit,
+    topology,
     defaultCtx: {
       hibaBaseUrl: env('HIBA_BASE_URL', 'http://localhost:9090'),
       permissions,

@@ -13,6 +13,9 @@
  *   DELETE /api/agents/:id
  *   POST   /api/intent
  *   POST   /api/run
+ *   GET    /api/topology/edges
+ *   POST   /api/topology/edges
+ *   POST   /api/topology/edges/approve
  */
 
 import { test, expect, beforeAll, afterAll } from '@jest/globals';
@@ -27,6 +30,7 @@ import { AuditTrail } from '../audit/AuditTrail';
 import { TrustRegistry } from '../trust/TrustRegistry';
 import { OrchestratorRunner } from './OrchestratorRunner';
 import { WorkflowStore } from './WorkflowStore';
+import { TopologyRegistry } from '../topology/TopologyRegistry';
 import { defineTool } from '../core/defineTool';
 import type { LLMClient, AccountingClient } from '../planning/NLPlanningService';
 import { NLPlanningService } from '../planning/NLPlanningService';
@@ -131,12 +135,14 @@ function makeToolbox() {
 let server: AgentServer;
 let port: number;
 let registry: TrustRegistry;
+let topology: TopologyRegistry;
 
 beforeAll(async () => {
   port = 18090; // avoid conflict with real server
   const planning = new NLPlanningService(mockLLM, mockAccounting);
   const { toolbox, audit } = makeToolbox();
   registry = new TrustRegistry(':memory:');
+  topology = new TopologyRegistry(':memory:');
   const orchestrator = new OrchestratorRunner(toolbox, audit);
   const workflowStore = new WorkflowStore(':memory:');
   server = new AgentServer(planning, {
@@ -146,6 +152,7 @@ beforeAll(async () => {
     orchestrator,
     workflowStore,
     auditTrail: audit,
+    topology,
     defaultCtx: {
       hibaBaseUrl: 'http://localhost:8092',
       permissions: ['material.write', 'material.read'],
@@ -611,5 +618,84 @@ test('POST /api/run without orchestrator returns 503', async () => {
     expect(res.status).toBe(503);
   } finally {
     await noOrchServer.stop();
+  }
+});
+
+// ── /api/topology/edges ──────────────────────────────────────────────────────
+
+test('POST /api/topology/edges creates a manual edge that is immediately approved', async () => {
+  const res = await request(port, 'POST', '/api/topology/edges', {
+    fromNodeId: 'node1', relation: 'upstream_of', toNodeId: 'node2',
+  });
+  expect(res.status).toBe(200);
+  const body = res.body as { status: string; source: string };
+  expect(body.status).toBe('approved');
+  expect(body.source).toBe('manual');
+});
+
+test('POST /api/topology/edges rejects an invalid relation', async () => {
+  const res = await request(port, 'POST', '/api/topology/edges', {
+    fromNodeId: 'node1', relation: 'flies_over', toNodeId: 'node2',
+  });
+  expect(res.status).toBe(400);
+});
+
+test('POST /api/topology/edges missing fields returns 400', async () => {
+  const res = await request(port, 'POST', '/api/topology/edges', { fromNodeId: 'node1' });
+  expect(res.status).toBe(400);
+});
+
+test('GET /api/topology/edges?status=suggested only returns pending edges', async () => {
+  // 為什麼重要：Dashboard 的待審核清單只能看到 suggested 的邊，這條路徑
+  // 錯了會讓已核准的邊被誤判成還要人工確認，或反過來洩漏未審核的推論結果。
+  topology.suggest({ fromNodeId: 'node3', relation: 'downstream_of', toNodeId: 'node4' });
+
+  const res = await request(port, 'GET', '/api/topology/edges?status=suggested');
+
+  expect(res.status).toBe(200);
+  const body = res.body as Array<{ fromNodeId: string; status: string }>;
+  expect(body.every(edge => edge.status === 'suggested')).toBe(true);
+  expect(body.some(edge => edge.fromNodeId === 'node3')).toBe(true);
+});
+
+test('POST /api/topology/edges/approve requires X-User-Id', async () => {
+  topology.suggest({ fromNodeId: 'node5', relation: 'backup_for', toNodeId: 'node6' });
+  const res = await request(port, 'POST', '/api/topology/edges/approve', {
+    fromNodeId: 'node5', relation: 'backup_for', toNodeId: 'node6',
+  });
+  expect(res.status).toBe(400);
+});
+
+test('POST /api/topology/edges/approve moves a suggested edge to approved', async () => {
+  topology.suggest({ fromNodeId: 'node7', relation: 'same_line', toNodeId: 'node8' });
+
+  const res = await request(port, 'POST', '/api/topology/edges/approve', {
+    fromNodeId: 'node7', relation: 'same_line', toNodeId: 'node8',
+  }, { 'X-User-Id': 'operator-1' });
+
+  expect(res.status).toBe(200);
+  const body = res.body as { status: string; approvedBy: string };
+  expect(body.status).toBe('approved');
+  expect(body.approvedBy).toBe('operator-1');
+});
+
+test('POST /api/topology/edges/approve on a non-existent edge returns 404', async () => {
+  const res = await request(port, 'POST', '/api/topology/edges/approve', {
+    fromNodeId: 'node-missing', relation: 'same_line', toNodeId: 'node-also-missing',
+  }, { 'X-User-Id': 'operator-1' });
+  expect(res.status).toBe(404);
+});
+
+test('topology endpoints return 503 when no registry is configured', async () => {
+  const noTopologyServer = new AgentServer(
+    new NLPlanningService(mockLLM, mockAccounting),
+    { port: 18094 },
+  );
+  await noTopologyServer.start();
+  try {
+    const res = await request(18094, 'GET', '/api/topology/edges');
+    expect(res.status).toBe(503);
+  } finally {
+    await noTopologyServer.stop();
   }
 });
