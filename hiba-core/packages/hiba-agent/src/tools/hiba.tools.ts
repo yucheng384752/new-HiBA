@@ -402,7 +402,7 @@ const methodFetchSop = defineTool({
     sopCode:       z.string(),
     title:         z.string().describe('SOP 標題'),
     version:       z.string().describe('文件版本'),
-    url:           z.string().describe('PDF 文件 URL'),
+    url:           z.string().describe('SOP 文件 URL'),
     effectiveDate: z.string().describe('生效日期 ISO 8601'),
   }),
   permissions: ['method.read'],
