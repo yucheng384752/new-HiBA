@@ -97,26 +97,50 @@ const manifest = current.map(entry => {
 });
 
 // ── input/output 主要欄位型別相容性檢查 ─────────────────────────────────────
-// 只驗證共同欄位的 type/enum 是否相容——不要求 required 清單或 description
-// 文字逐字一致。manifest 常年手工加了 summaryHints/toolName/domain 這類
-// canonical Tool 定義原本就沒有、也不需要有的欄位，逐字比對只會製造出跟
-// 實際契約無關的假陽性（詳見 2026-08-31 討論的落差分類 A/B/C）。
-function schemaTypeIncompatibilities(
+// 驗證兩邊「欄位集合是否對稱」+ 共同欄位的 type/enum 是否相容——不要求
+// required 清單或 description 文字逐字一致（詳見 2026-08-31 討論的落差
+// 分類 A/B/C，這點是刻意的，不是漏掉）。
+//
+// 欄位集合對稱性用兩邊 properties key 的聯集檢查，不能只看 manifest 既有
+// 的 key：只看 manifest 一側，會讓「canonical 新增了欄位、manifest 沒跟上」
+// 這種真實落差完全不可見——這正是 material.readAttachment.summary／
+// env.verifyFileIo.failReason 曾經走漏的那種 bug（canonical 漏了腳本真的
+// 會回傳的欄位），必須雙向都查。manifest 專屬的 output 自報欄位
+// （toolName/domain，見 preserveAuditSelfReportFields）在呼叫前已經被合併
+// 進 generated，所以走到這裡兩邊天生就對稱，不需要另外的容許清單。
+function schemaFieldSetMismatches(
   label: string,
   current: JsonSchemaLike | undefined,
   generated: JsonSchemaLike | undefined,
 ): string[] {
   const currentProps = current?.properties ?? {};
+  const generatedProps = generated?.properties ?? {};
+  const allKeys = new Set([...Object.keys(currentProps), ...Object.keys(generatedProps)]);
   const errors: string[] = [];
-  for (const key of Object.keys(currentProps)) {
+  for (const key of allKeys) {
     const currentDef = propDef(current, key);
     const generatedDef = propDef(generated, key);
-    if (!generatedDef) continue; // manifest 可以有 canonical 沒有的欄位（如自報稽核用的 toolName/domain）
-    if (JSON.stringify(currentDef?.type) !== JSON.stringify(generatedDef.type)) {
-      errors.push(`${label}.${key}: type ${JSON.stringify(currentDef?.type)} !== ${JSON.stringify(generatedDef.type)}`);
+    if (!generatedDef) {
+      errors.push(`${label}.${key}: manifest 有這個欄位，canonical Tool 定義沒有`);
+      continue;
     }
-    if (currentDef?.enum && JSON.stringify(currentDef.enum) !== JSON.stringify(generatedDef.enum)) {
+    if (!currentDef) {
+      errors.push(`${label}.${key}: canonical Tool 定義有這個欄位，manifest 沒有記錄`);
+      continue;
+    }
+    if (JSON.stringify(currentDef.type) !== JSON.stringify(generatedDef.type)) {
+      errors.push(`${label}.${key}: type ${JSON.stringify(currentDef.type)} !== ${JSON.stringify(generatedDef.type)}`);
+    }
+    if (currentDef.enum && JSON.stringify(currentDef.enum) !== JSON.stringify(generatedDef.enum)) {
       errors.push(`${label}.${key}: enum ${JSON.stringify(currentDef.enum)} !== ${JSON.stringify(generatedDef.enum)}`);
+    }
+    // 陣列欄位往下遞迴一層 items.properties（如 env.readSensor 的
+    // sensors[]），不做更深層遞迴——目前 manifest 裡沒有更深的巢狀結構，
+    // 真的出現時再擴充，不先做投機的一般化。
+    const currentItems = (currentDef as { items?: JsonSchemaLike }).items;
+    const generatedItems = (generatedDef as { items?: JsonSchemaLike }).items;
+    if (currentItems?.properties || generatedItems?.properties) {
+      errors.push(...schemaFieldSetMismatches(`${label}.${key}[]`, currentItems, generatedItems));
     }
   }
   return errors;
@@ -130,8 +154,8 @@ if (process.argv.includes('--check')) {
     if (entry.scriptName !== undefined && entry.scriptName !== (generated as OldEntry).scriptName) {
       errors.push(`${name}: scriptName ${entry.scriptName} !== ${(generated as OldEntry).scriptName}`);
     }
-    errors.push(...schemaTypeIncompatibilities(`${name}.inputSchema`, entry.inputSchema, (generated as OldEntry).inputSchema as JsonSchemaLike | undefined));
-    errors.push(...schemaTypeIncompatibilities(`${name}.outputSchema`, entry.outputSchema, (generated as OldEntry).outputSchema as JsonSchemaLike | undefined));
+    errors.push(...schemaFieldSetMismatches(`${name}.inputSchema`, entry.inputSchema, (generated as OldEntry).inputSchema as JsonSchemaLike | undefined));
+    errors.push(...schemaFieldSetMismatches(`${name}.outputSchema`, entry.outputSchema, (generated as OldEntry).outputSchema as JsonSchemaLike | undefined));
   });
   if (errors.length > 0) {
     throw new Error(`Pi manifest has incompatible schemas:\n${errors.join('\n')}`);
