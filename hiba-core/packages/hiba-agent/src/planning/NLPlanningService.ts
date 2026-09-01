@@ -12,6 +12,13 @@ import type {
   ToolSpec,
 } from '../types/hiba.types';
 import { validatePlan } from './validatePlan';
+import type {
+  FacilityEdge,
+  FacilityIndexEntry,
+  FacilityTopologyDocument,
+  TopologyEdgeStatus,
+  TopologyRelation,
+} from '../topology/FacilityTopology.types';
 
 export type { NodeResourceMap, ResourceItem } from '../types/hiba.types';
 
@@ -42,6 +49,17 @@ export interface AccountingClient {
   listNodeResources(): Promise<NodeResourceMap>;
   getNodeResources(nodeId: string): Promise<ResourceItem[]>;
   listNodes(): Promise<NodeDescriptor[]>;
+  /** 反查給定 nodeId 所屬的場域（見 hiba-core/facilities/README.md）。 */
+  listFacilitiesForNodes(nodeIds: string[]): Promise<FacilityIndexEntry[]>;
+  getFacility(facilityId: string, opts?: { status?: TopologyEdgeStatus }): Promise<FacilityTopologyDocument>;
+  /** AuditTrail 自動偵測寫入候選邊；已 approved 的邊不會被降級。 */
+  suggestFacilityEdge(facilityId: string, input: {
+    fromStationId: string;
+    relation: TopologyRelation;
+    toStationId: string;
+    lineId?: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<FacilityEdge>;
 }
 
 // ── Zod Runtime Validation ────────────────────────────────────────────────────

@@ -76,6 +76,9 @@ function makeAccounting(resources: NodeResourceMap = mockResources): jest.Mocked
     listNodeResources: jest.fn<AccountingClient['listNodeResources']>().mockResolvedValue(resources),
     getNodeResources:  jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
     listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(nodes),
+    listFacilitiesForNodes: jest.fn<AccountingClient['listFacilitiesForNodes']>().mockResolvedValue([]),
+    getFacility: jest.fn<AccountingClient['getFacility']>().mockRejectedValue(new Error('not used in this test')),
+    suggestFacilityEdge: jest.fn<AccountingClient['suggestFacilityEdge']>().mockRejectedValue(new Error('not used in this test')),
   };
 }
 
@@ -245,6 +248,9 @@ describe('NLPlanningService', () => {
         .mockRejectedValue(new Error('accounting timeout')),
       getNodeResources: jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
       listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(mockNodes),
+      listFacilitiesForNodes: jest.fn<AccountingClient['listFacilitiesForNodes']>().mockResolvedValue([]),
+      getFacility: jest.fn<AccountingClient['getFacility']>().mockRejectedValue(new Error('not used in this test')),
+      suggestFacilityEdge: jest.fn<AccountingClient['suggestFacilityEdge']>().mockRejectedValue(new Error('not used in this test')),
     };
 
     await expect(

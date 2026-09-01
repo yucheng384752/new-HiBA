@@ -1,8 +1,9 @@
 import type { AuditTrail } from '../audit/AuditTrail';
-import type { TopologyRegistry } from './TopologyRegistry';
+import type { AccountingClient } from '../planning/NLPlanningService';
 
 /**
- * 從 AuditTrail 推論產線拓樸候選邊。
+ * 從 AuditTrail 推論產線拓樸候選邊，寫入 accounting-server 管理的場域檔案
+ * （見 hiba-core/facilities/README.md）。
  * 規格：實作規格/plan()_LLM生成品質改善與輕量RAG檢索設計.md §四。
  *
  * 為什麼掃 critical_events 而不是規格原文寫的 audit_trail：查證後發現
@@ -13,6 +14,11 @@ import type { TopologyRegistry } from './TopologyRegistry';
  * 本來就不代表任何產線站點，只有真正派工到不同物理節點之間的順序才有
  * 拓樸意義，所以只看 remote 派工的 DATA_TRANSFERRED 事件是對的範圍，不是
  * 退而求其次的妥協。
+ *
+ * 這個偵測器仍然留在 hiba-agent（不是搬進 accounting-server）——它讀的是
+ * hiba-agent 自己本機的 AuditTrail SQLite，accounting-server 沒有管道存取
+ * 那份資料；改成寫入場域檔案時，透過 AccountingClient 呼叫 accounting-server
+ * 的 HTTP API，跟其他所有跨服務資料存取走同一條路。
  */
 export interface TopologySequenceDetectorOptions {
   /**
@@ -41,13 +47,19 @@ interface NodeTransfer {
   occurredAt: string;
 }
 
+interface QualifyingAdjacency {
+  fromNodeId: string;
+  toNodeId: string;
+  occurrences: number;
+}
+
 export class TopologySequenceDetector {
   private readonly minOccurrences: number;
   private readonly lookbackMs: number;
 
   constructor(
     private readonly audit: AuditTrail,
-    private readonly topology: TopologyRegistry,
+    private readonly accounting: AccountingClient,
     options: TopologySequenceDetectorOptions = {},
   ) {
     this.minOccurrences = options.minOccurrences ?? DEFAULT_MIN_OCCURRENCES;
@@ -55,9 +67,12 @@ export class TopologySequenceDetector {
   }
 
   /**
-   * 掃一次，把達到門檻的候選邊寫入 topology（status='suggested'，見
-   * TopologyRegistry.suggest()——已核准的邊不會被降級）。回傳這次偵測到
-   * 的邊，供呼叫端記錄或測試使用。
+   * 掃一次，把達到門檻、且兩個 nodeId 都屬於同一場域的候選邊寫入該場域檔案
+   * （status='suggested'，見 accounting-server.mjs 的 upsertEdge()——已核准
+   * 的邊不會被降級）。兩個 nodeId 不在同一場域（或都不在任何場域）的候選
+   * 會被跳過，不視為錯誤——場域/站點要先有人工登記，自動偵測才有東西可以
+   * 掛，這是預期中的冷啟動行為，不是 bug。回傳這次真的寫入的邊，供呼叫端
+   * 記錄或測試使用。
    */
   async run(): Promise<DetectedEdge[]> {
     const events = await this.audit.queryEvents({
@@ -94,11 +109,27 @@ export class TopologySequenceDetector {
       }
     }
 
-    const detected: DetectedEdge[] = [];
+    const qualifying: QualifyingAdjacency[] = [];
     for (const [key, occurrences] of adjacencyCounts) {
       if (occurrences < this.minOccurrences) continue;
       const [fromNodeId, toNodeId] = JSON.parse(key) as [string, string];
-      this.topology.suggest({ fromNodeId, relation: 'upstream_of', toNodeId });
+      qualifying.push({ fromNodeId, toNodeId, occurrences });
+    }
+    if (qualifying.length === 0) return [];
+
+    const allNodeIds = [...new Set(qualifying.flatMap(q => [q.fromNodeId, q.toNodeId]))];
+    const facilities = await this.accounting.listFacilitiesForNodes(allNodeIds);
+
+    const detected: DetectedEdge[] = [];
+    for (const { fromNodeId, toNodeId, occurrences } of qualifying) {
+      const facility = facilities.find(f =>
+        f.stations.some(s => s.nodeId === fromNodeId) && f.stations.some(s => s.nodeId === toNodeId));
+      if (!facility) continue; // 沒有場域同時認得這兩個節點——沒有東西可以掛，跳過
+      const fromStationId = facility.stations.find(s => s.nodeId === fromNodeId)!.stationId;
+      const toStationId = facility.stations.find(s => s.nodeId === toNodeId)!.stationId;
+      await this.accounting.suggestFacilityEdge(facility.facilityId, {
+        fromStationId, relation: 'upstream_of', toStationId,
+      });
       detected.push({ fromNodeId, toNodeId, occurrences });
     }
 

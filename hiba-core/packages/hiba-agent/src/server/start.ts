@@ -7,7 +7,6 @@ import { TrustRegistry }        from '../trust/TrustRegistry';
 import { OrchestratorRunner, parseNodeAddresses } from './OrchestratorRunner';
 import { AgentServer }          from './AgentServer';
 import { WorkflowStore }        from './WorkflowStore';
-import { TopologyRegistry }     from '../topology/TopologyRegistry';
 import { TopologySequenceDetector } from '../topology/TopologySequenceDetector';
 import { registerHibaTools }    from '../tools/hiba.tools';
 import { registerAuditTools }   from '../tools/audit.tools';
@@ -54,11 +53,10 @@ async function main(): Promise<void> {
   const toolbox  = new HiBAToolbox({ auditWriter: audit, permissions });
   const registry = new TrustRegistry(env('TRUST_DB', './hiba-trust.db'));
   const workflowStore = new WorkflowStore(env('WORKFLOW_DB', './hiba-workflows.db'));
-  const topology = new TopologyRegistry(env('TOPOLOGY_DB', './hiba-topology.db'));
 
   registerHibaTools(toolbox);
   registerAuditTools(toolbox, audit);
-  registerContextRetrievalTools(toolbox, { topology, audit, accounting });
+  registerContextRetrievalTools(toolbox, { audit, accounting });
 
   const planning = new NLPlanningService(llm, accounting, { toolbox, summaryLLM });
 
@@ -81,7 +79,6 @@ async function main(): Promise<void> {
     orchestrator,
     workflowStore,
     auditTrail: audit,
-    topology,
     defaultCtx: {
       hibaBaseUrl: env('HIBA_BASE_URL', 'http://localhost:9090'),
       permissions,
@@ -92,7 +89,9 @@ async function main(): Promise<void> {
 
   // ── 拓樸序列偵測背景排程（規格 §四；門檻/頻率留給實作階段決定，見
   // TopologySequenceDetector 的說明）────────────────────────────────────────
-  const topologyDetector = new TopologySequenceDetector(audit, topology, {
+  // 寫入目標是 accounting-server 管理的場域檔案（見 hiba-core/facilities/），
+  // 透過 accounting client 呼叫，不是本機資料庫。
+  const topologyDetector = new TopologySequenceDetector(audit, accounting, {
     minOccurrences: Number(env('TOPOLOGY_MIN_OCCURRENCES', '3')),
     lookbackMs: Number(env('TOPOLOGY_LOOKBACK_MS', String(7 * 24 * 60 * 60 * 1000))),
   });

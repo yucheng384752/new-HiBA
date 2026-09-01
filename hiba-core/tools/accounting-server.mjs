@@ -16,11 +16,20 @@
  *
  *   POST   /api/audit/anchor           → store anchored audit records
  *   GET    /api/audit/anchor           → query anchored records (?traceId=)
+ *
+ *   GET    /api/facilities                     → facility index (?nodeIds= for reverse lookup)
+ *   POST   /api/facilities                     → create a new facility file
+ *   GET    /api/facilities/:facilityId         → full facility document (?status= to filter edges)
+ *   POST   /api/facilities/:facilityId/stations       → upsert a station
+ *   POST   /api/facilities/:facilityId/edges          → manual edge, immediately approved
+ *   POST   /api/facilities/:facilityId/edges/suggest  → AuditTrail-inferred edge (suggested; upgrade-guarded)
+ *   POST   /api/facilities/:facilityId/edges/approve  → approve a suggested edge (requires X-User-Id)
+ *
  *   GET    /health                     → { status }
  */
 import http from 'node:http';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -55,6 +64,18 @@ const PROTOCOL_VERSION = '1.0';
 const NODE_LEASE_MS = Number(process.env.NODE_LEASE_MS ?? 30_000);
 const catalogDir = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'scripts_pi', 'deploy_http', 'scripts');
 
+// ── 場域拓樸（facilities）──────────────────────────────────────────────────────
+// 真實來源是 hiba-core/facilities/<facilityId>.json，人工編輯、git 追蹤。這裡
+// 不維護另一份索引檔——每次需要「全部場域清單」時直接 readdirSync 這個目錄，
+// 檔案本身就是登錄表，避免重蹈這個 repo 清理過的「複本各自漂移」覆轍。
+// 見 hiba-core/facilities/README.md。
+const facilitiesDir = process.env.FACILITIES_DIR ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'facilities');
+const TOPOLOGY_RELATIONS = ['upstream_of', 'downstream_of', 'backup_for', 'same_line'];
+const FACILITY_ID_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
+
+/** facilityId → { doc, mtimeMs } —— 只在檔案 mtime 改變時才重新 JSON.parse */
+const facilityCache = new Map();
+
 /** @type {Array<{anchoredAt: string, traceId: string, records: unknown[]}>} */
 const auditAnchors = [];
 
@@ -67,7 +88,7 @@ let blockchainBlockNumber = 1;
 const CORS = {
   'Access-Control-Allow-Origin':  '*',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, X-Trace-Id, X-Agent-Id, X-Depth',
+  'Access-Control-Allow-Headers': 'Content-Type, X-Trace-Id, X-Agent-Id, X-Depth, X-User-Id',
 };
 
 function reply(res, status, body) {
@@ -154,6 +175,129 @@ function toolCatalogEntry(toolName, version) {
     sha256: sha256Hex(content),
     deploy: { type: 'script', scriptName: manifest.scriptName, content, manifest, overwrite: true },
   };
+}
+
+// ── 場域拓樸 helpers ─────────────────────────────────────────────────────────
+
+function isValidFacilityId(id) {
+  return typeof id === 'string' && FACILITY_ID_RE.test(id);
+}
+
+function facilityPath(facilityId) {
+  return join(facilitiesDir, `${facilityId}.json`);
+}
+
+function listFacilityIds() {
+  if (!existsSync(facilitiesDir)) return [];
+  return readdirSync(facilitiesDir)
+    .filter(name => name.endsWith('.json'))
+    .map(name => name.slice(0, -'.json'.length))
+    .filter(isValidFacilityId);
+}
+
+function loadFacility(facilityId) {
+  const path = facilityPath(facilityId);
+  if (!existsSync(path)) return null;
+  const mtimeMs = statSync(path).mtimeMs;
+  const cached = facilityCache.get(facilityId);
+  if (cached && cached.mtimeMs === mtimeMs) return cached.doc;
+  const doc = JSON.parse(readFileSync(path, 'utf8'));
+  facilityCache.set(facilityId, { doc, mtimeMs });
+  return doc;
+}
+
+function saveFacility(facilityId, doc) {
+  doc.updatedAt = new Date().toISOString();
+  const path = facilityPath(facilityId);
+  writeFileSync(path, `${JSON.stringify(doc, null, 2)}\n`, 'utf8');
+  facilityCache.set(facilityId, { doc, mtimeMs: statSync(path).mtimeMs });
+}
+
+function newFacilityDoc(facilityId, name, processDescription) {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: 1,
+    facilityId,
+    name,
+    processDescription: processDescription ?? '',
+    stations: [],
+    edges: [],
+    updatedAt: now,
+  };
+}
+
+function facilityIndexEntries(nodeIdFilter) {
+  const filterSet = nodeIdFilter && nodeIdFilter.length > 0 ? new Set(nodeIdFilter) : null;
+  const entries = [];
+  for (const facilityId of listFacilityIds()) {
+    const doc = loadFacility(facilityId);
+    if (!doc) continue;
+    const stations = doc.stations.map(s => ({ stationId: s.stationId, nodeId: s.nodeId, name: s.name }));
+    if (filterSet && !stations.some(s => s.nodeId && filterSet.has(s.nodeId))) continue;
+    entries.push({ facilityId: doc.facilityId, name: doc.name, stations });
+  }
+  return entries;
+}
+
+function edgeKey(e) {
+  return JSON.stringify([e.fromStationId, e.relation, e.toStationId]);
+}
+
+function findEdge(doc, input) {
+  const key = edgeKey(input);
+  return doc.edges.find(e => edgeKey(e) === key) ?? null;
+}
+
+function validateEdgeInput(doc, body) {
+  if (typeof body?.fromStationId !== 'string' || !body.fromStationId) return '"fromStationId" is required';
+  if (typeof body?.toStationId !== 'string' || !body.toStationId) return '"toStationId" is required';
+  if (!TOPOLOGY_RELATIONS.includes(body?.relation)) return `"relation" must be one of ${TOPOLOGY_RELATIONS.join(', ')}`;
+  if (!doc.stations.some(s => s.stationId === body.fromStationId)) return `Unknown fromStationId '${body.fromStationId}'`;
+  if (!doc.stations.some(s => s.stationId === body.toStationId)) return `Unknown toStationId '${body.toStationId}'`;
+  return null;
+}
+
+function upsertStation(doc, input) {
+  const existing = doc.stations.find(s => s.stationId === input.stationId);
+  const station = {
+    stationId: input.stationId,
+    name: input.name ?? existing?.name ?? input.stationId,
+    nodeId: input.nodeId ?? existing?.nodeId ?? null,
+    description: input.description ?? existing?.description ?? '',
+    metadata: input.metadata ?? existing?.metadata ?? {},
+  };
+  if (existing) Object.assign(existing, station);
+  else doc.stations.push(station);
+  return station;
+}
+
+/** source='manual' 搭配 forcedStatus='approved' 對應舊 upsertManual()；
+ *  source='audit_trail_inference' 搭配 forcedStatus=undefined 對應舊 suggest()
+ *  ——已經是 approved 的邊不會被 suggest 降級回 suggested。 */
+function upsertEdge(doc, input, source, forcedStatus) {
+  const existing = findEdge(doc, input);
+  const status = forcedStatus ?? (existing?.status === 'approved' ? 'approved' : 'suggested');
+  const edge = {
+    fromStationId: input.fromStationId,
+    relation: input.relation,
+    toStationId: input.toStationId,
+    lineId: input.lineId ?? existing?.lineId ?? null,
+    status,
+    source,
+    metadata: input.metadata ?? existing?.metadata ?? {},
+    updatedAt: new Date().toISOString(),
+  };
+  if (existing) Object.assign(existing, edge);
+  else doc.edges.push(edge);
+  return edge;
+}
+
+function approveEdge(doc, input) {
+  const existing = findEdge(doc, input ?? {});
+  if (!existing) return null;
+  existing.status = 'approved';
+  existing.updatedAt = new Date().toISOString();
+  return existing;
 }
 
 // ── Request handler ───────────────────────────────────────────────────────────
@@ -456,6 +600,142 @@ const server = http.createServer(async (req, res) => {
         reply(res, 200, { nodeId, status: 'deregistered' });
         return;
       }
+    }
+
+    // GET /api/facilities?nodeIds=a,b,c → facility index / reverse lookup
+    if (method === 'GET' && urlPath === '/api/facilities') {
+      const params = new URLSearchParams(qs ?? '');
+      const nodeIdsParam = params.get('nodeIds');
+      const nodeIds = nodeIdsParam ? nodeIdsParam.split(',').map(s => s.trim()).filter(Boolean) : null;
+      reply(res, 200, facilityIndexEntries(nodeIds));
+      return;
+    }
+
+    // POST /api/facilities → create a new facility file
+    if (method === 'POST' && urlPath === '/api/facilities') {
+      const body = await readBody(req);
+      if (!isValidFacilityId(body?.facilityId)) {
+        replyError(res, 400, 'REQUEST_INVALID', '"facilityId" must match ^[a-z0-9][a-z0-9_-]{0,63}$');
+        return;
+      }
+      if (typeof body?.name !== 'string' || !body.name.trim()) {
+        replyError(res, 400, 'REQUEST_INVALID', '"name" is required');
+        return;
+      }
+      if (existsSync(facilityPath(body.facilityId))) {
+        replyError(res, 409, 'RESOURCE_CONFLICT', `Facility '${body.facilityId}' already exists`);
+        return;
+      }
+      const doc = newFacilityDoc(body.facilityId, body.name, body.processDescription);
+      saveFacility(body.facilityId, doc);
+      reply(res, 201, doc);
+      return;
+    }
+
+    // GET /api/facilities/:facilityId?status=approved|suggested
+    const facilityMatch = urlPath.match(/^\/api\/facilities\/([^/]+)$/);
+    if (method === 'GET' && facilityMatch) {
+      const facilityId = decodeURIComponent(facilityMatch[1]);
+      const doc = loadFacility(facilityId);
+      if (!doc) {
+        replyError(res, 404, 'RESOURCE_NOT_FOUND', `Facility '${facilityId}' not found`);
+        return;
+      }
+      const params = new URLSearchParams(qs ?? '');
+      const status = params.get('status');
+      if (status && status !== 'approved' && status !== 'suggested') {
+        replyError(res, 400, 'REQUEST_INVALID', '"status" must be "approved" or "suggested"');
+        return;
+      }
+      reply(res, 200, status ? { ...doc, edges: doc.edges.filter(e => e.status === status) } : doc);
+      return;
+    }
+
+    // POST /api/facilities/:facilityId/stations → upsert a station
+    const stationMatch = urlPath.match(/^\/api\/facilities\/([^/]+)\/stations$/);
+    if (method === 'POST' && stationMatch) {
+      const facilityId = decodeURIComponent(stationMatch[1]);
+      const doc = loadFacility(facilityId);
+      if (!doc) {
+        replyError(res, 404, 'RESOURCE_NOT_FOUND', `Facility '${facilityId}' not found`);
+        return;
+      }
+      const body = await readBody(req);
+      if (typeof body?.stationId !== 'string' || !body.stationId.trim() || typeof body?.name !== 'string' || !body.name.trim()) {
+        replyError(res, 400, 'REQUEST_INVALID', '"stationId" and "name" are required');
+        return;
+      }
+      const station = upsertStation(doc, body);
+      saveFacility(facilityId, doc);
+      reply(res, 200, station);
+      return;
+    }
+
+    // POST /api/facilities/:facilityId/edges → manual edge, immediately approved
+    const edgeMatch = urlPath.match(/^\/api\/facilities\/([^/]+)\/edges$/);
+    if (method === 'POST' && edgeMatch) {
+      const facilityId = decodeURIComponent(edgeMatch[1]);
+      const doc = loadFacility(facilityId);
+      if (!doc) {
+        replyError(res, 404, 'RESOURCE_NOT_FOUND', `Facility '${facilityId}' not found`);
+        return;
+      }
+      const body = await readBody(req);
+      const validationError = validateEdgeInput(doc, body);
+      if (validationError) {
+        replyError(res, 400, 'REQUEST_INVALID', validationError);
+        return;
+      }
+      const edge = upsertEdge(doc, body, 'manual', 'approved');
+      saveFacility(facilityId, doc);
+      reply(res, 200, edge);
+      return;
+    }
+
+    // POST /api/facilities/:facilityId/edges/suggest → AuditTrail-inferred edge
+    const edgeSuggestMatch = urlPath.match(/^\/api\/facilities\/([^/]+)\/edges\/suggest$/);
+    if (method === 'POST' && edgeSuggestMatch) {
+      const facilityId = decodeURIComponent(edgeSuggestMatch[1]);
+      const doc = loadFacility(facilityId);
+      if (!doc) {
+        replyError(res, 404, 'RESOURCE_NOT_FOUND', `Facility '${facilityId}' not found`);
+        return;
+      }
+      const body = await readBody(req);
+      const validationError = validateEdgeInput(doc, body);
+      if (validationError) {
+        replyError(res, 400, 'REQUEST_INVALID', validationError);
+        return;
+      }
+      const edge = upsertEdge(doc, body, 'audit_trail_inference', undefined);
+      saveFacility(facilityId, doc);
+      reply(res, 200, edge);
+      return;
+    }
+
+    // POST /api/facilities/:facilityId/edges/approve
+    const edgeApproveMatch = urlPath.match(/^\/api\/facilities\/([^/]+)\/edges\/approve$/);
+    if (method === 'POST' && edgeApproveMatch) {
+      const facilityId = decodeURIComponent(edgeApproveMatch[1]);
+      const doc = loadFacility(facilityId);
+      if (!doc) {
+        replyError(res, 404, 'RESOURCE_NOT_FOUND', `Facility '${facilityId}' not found`);
+        return;
+      }
+      const approvedBy = req.headers['x-user-id'];
+      if (!approvedBy || !String(approvedBy).trim()) {
+        replyError(res, 400, 'REQUEST_INVALID', 'X-User-Id header is required');
+        return;
+      }
+      const body = await readBody(req);
+      const edge = approveEdge(doc, body);
+      if (!edge) {
+        replyError(res, 404, 'RESOURCE_NOT_FOUND', `Edge '${body?.fromStationId} --${body?.relation}--> ${body?.toStationId}' not found`);
+        return;
+      }
+      saveFacility(facilityId, doc);
+      reply(res, 200, { ...edge, approvedBy });
+      return;
     }
 
     // POST /api/audit/anchor

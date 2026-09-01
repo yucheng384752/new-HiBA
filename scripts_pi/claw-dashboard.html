@@ -3008,20 +3008,42 @@ function buildPlanContext() {
 }
 
 // ── Line Topology Tab（產線物理拓樸：上下游/站點順序，非上面「節點網路拓樸」）──
-// 規格：實作規格/plan()_LLM生成品質改善與輕量RAG檢索設計.md §四
-// API：hiba-agent AgentServer 的 /api/topology/edges，跟左側節點拓樸完全獨立。
+// 規格：實作規格/plan()_LLM生成品質改善與輕量RAG檢索設計.md §四，2026-09
+// 改版為每場域一份 JSON 檔案（見 hiba-core/facilities/README.md），取代原本
+// 的 SQLite 邊資料表設計。API：Accounting Server 的 /api/facilities*
+// （workflowAccountingUrl，不是 workflowPlanningUrl），跟左側節點拓樸完全
+// 獨立、也不是同一個服務。
 const TOPOLOGY_RELATIONS = ['upstream_of', 'downstream_of', 'backup_for', 'same_line'];
-let lineTopologyState = { approved: [], suggested: [] };
+let lineTopologyState = { facilities: [] };
+let selectedTopoFacilityId = null;
 
-async function loadTopologyEdges() {
-  const [approvedRes, suggestedRes] = await Promise.all([
-    safeFetch(`${workflowPlanningUrl}/api/topology/edges?status=approved`, { timeout: 8000 }),
-    safeFetch(`${workflowPlanningUrl}/api/topology/edges?status=suggested`, { timeout: 8000 }),
-  ]);
-  if (!approvedRes.ok || !suggestedRes.ok) {
-    throw new Error(`HTTP ${approvedRes.status}/${suggestedRes.status}`);
-  }
-  return { approved: await approvedRes.json(), suggested: await suggestedRes.json() };
+function topoBaseUrl() {
+  return workflowAccountingUrl.replace(/\/+$/, '');
+}
+
+async function loadFacilities() {
+  const base = topoBaseUrl();
+  const indexRes = await safeFetch(`${base}/api/facilities`, { timeout: 8000 });
+  if (!indexRes.ok) throw new Error(`HTTP ${indexRes.status}`);
+  const index = await indexRes.json();
+  const facilities = await Promise.all(index.map(async entry => {
+    const res = await safeFetch(`${base}/api/facilities/${encodeURIComponent(entry.facilityId)}`, { timeout: 8000 });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }));
+  return { facilities };
+}
+
+function topoStationOptions(facility) {
+  return facility.stations.map(s => `<option value="${escapeHtml(s.stationId)}">${escapeHtml(s.name)}</option>`).join('');
+}
+
+function onTopoFacilityChange() {
+  selectedTopoFacilityId = document.getElementById('topoFacilityId').value;
+  const facility = lineTopologyState.facilities.find(f => f.facilityId === selectedTopoFacilityId);
+  const stationOptions = facility ? topoStationOptions(facility) : '';
+  document.getElementById('topoFromStation').innerHTML = stationOptions;
+  document.getElementById('topoToStation').innerHTML = stationOptions;
 }
 
 function topoEdgeRow(edgeItem, actionHtml) {
@@ -3030,10 +3052,39 @@ function topoEdgeRow(edgeItem, actionHtml) {
   return `
     <div class="history-item">
       <div>
-        <div class="hi-name">${escapeHtml(edgeItem.fromNodeId)} --${escapeHtml(edgeItem.relation)}--> ${escapeHtml(edgeItem.toNodeId)}</div>
+        <div class="hi-name">${escapeHtml(edgeItem.fromStationId)} --${escapeHtml(edgeItem.relation)}--> ${escapeHtml(edgeItem.toStationId)}</div>
         <div class="hi-meta">${sourceLabel}${lineLabel}</div>
       </div>
       ${actionHtml}
+    </div>`;
+}
+
+function facilityBlockHtml(facility) {
+  const stationsHtml = facility.stations
+    .map(s => `<div class="hi-meta">${escapeHtml(s.stationId)} · ${escapeHtml(s.name)}${s.nodeId ? ` · node: ${escapeHtml(s.nodeId)}` : ''}</div>`)
+    .join('');
+  const withIndex = facility.edges.map((e, i) => ({ e, i }));
+  const suggested = withIndex.filter(x => x.e.status === 'suggested');
+  const approved = withIndex.filter(x => x.e.status === 'approved');
+
+  const suggestedHtml = suggested.length
+    ? suggested.map(({ e, i }) => topoEdgeRow(
+        e, `<button class="hi-approve" onclick="approveTopologyEdge('${escapeHtml(facility.facilityId)}',${i})">核准</button>`,
+      )).join('')
+    : '<div class="empty-state" style="padding:12px 0"><div class="icon">✓</div>沒有待審核的拓樸邊</div>';
+  const approvedHtml = approved.length
+    ? approved.map(({ e }) => topoEdgeRow(e, '')).join('')
+    : '<div class="empty-state" style="padding:12px 0"><div class="icon">📭</div>尚未設定任何拓樸邊</div>';
+
+  return `
+    <div class="deploy-history">
+      <h3>${escapeHtml(facility.name)} <span class="hi-meta">(${escapeHtml(facility.facilityId)})</span></h3>
+      <div class="hi-meta">${escapeHtml(facility.processDescription)}</div>
+      <div style="margin:8px 0">${stationsHtml}</div>
+      <h4>待審核（AuditTrail 自動偵測，需人工核准才會出現在 plan() 檢索結果）</h4>
+      ${suggestedHtml}
+      <h4>已核准</h4>
+      ${approvedHtml}
     </div>`;
 }
 
@@ -3042,59 +3093,58 @@ async function renderLineTopology() {
   el.innerHTML = '<div class="empty-state"><div class="icon">🔗</div>載入中…</div>';
 
   try {
-    lineTopologyState = await loadTopologyEdges();
+    lineTopologyState = await loadFacilities();
   } catch (e) {
-    el.innerHTML = `<div class="deploy-form"><div style="color:var(--red)">載入失敗：${escapeHtml(e.message)}（確認 hiba-agent AgentServer 是否已啟動並設定 Planning URL）</div></div>`;
+    el.innerHTML = `<div class="deploy-form"><div style="color:var(--red)">載入失敗：${escapeHtml(e.message)}（確認 Accounting Server 是否已啟動並設定 Accounting URL）</div></div>`;
     return;
   }
 
+  if (lineTopologyState.facilities.length === 0) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">📭</div>尚未設定任何場域（見 hiba-core/facilities/README.md）</div>';
+    return;
+  }
+
+  if (!lineTopologyState.facilities.some(f => f.facilityId === selectedTopoFacilityId)) {
+    selectedTopoFacilityId = lineTopologyState.facilities[0].facilityId;
+  }
+  const selectedFacility = lineTopologyState.facilities.find(f => f.facilityId === selectedTopoFacilityId);
+
+  const facilityOptions = lineTopologyState.facilities
+    .map(f => `<option value="${escapeHtml(f.facilityId)}"${f.facilityId === selectedTopoFacilityId ? ' selected' : ''}>${escapeHtml(f.name)}</option>`)
+    .join('');
   const relationOptions = TOPOLOGY_RELATIONS.map(r => `<option value="${r}">${r}</option>`).join('');
-  const nodeIdOptions = [...nodes.keys()].map(id => `<option value="${escapeHtml(id)}">`).join('');
-
-  const suggestedHtml = lineTopologyState.suggested.length
-    ? lineTopologyState.suggested.map((edgeItem, i) => topoEdgeRow(
-        edgeItem, `<button class="hi-approve" onclick="approveTopologyEdge(${i})">核准</button>`,
-      )).join('')
-    : '<div class="empty-state" style="padding:20px 0"><div class="icon">✓</div>沒有待審核的拓樸邊</div>';
-
-  const approvedHtml = lineTopologyState.approved.length
-    ? lineTopologyState.approved.map(edgeItem => topoEdgeRow(edgeItem, '')).join('')
-    : '<div class="empty-state" style="padding:20px 0"><div class="icon">📭</div>尚未設定任何拓樸邊</div>';
+  const stationOptions = selectedFacility ? topoStationOptions(selectedFacility) : '';
+  const facilitiesHtml = lineTopologyState.facilities.map(facilityBlockHtml).join('');
 
   el.innerHTML = `
     <div class="deploy-form">
       <h3>新增拓樸邊（人工維護，新增後立即生效）</h3>
       <div class="deploy-meta">
-        <div><label>From Node ID</label><input id="topoFromNode" list="topoNodeIds" placeholder="node1"></div>
+        <div><label>場域</label><select id="topoFacilityId" onchange="onTopoFacilityChange()">${facilityOptions}</select></div>
         <div><label>Relation</label><select id="topoRelation">${relationOptions}</select></div>
-        <div><label>To Node ID</label><input id="topoToNode" list="topoNodeIds" placeholder="node2"></div>
+        <div><label>From Station</label><select id="topoFromStation">${stationOptions}</select></div>
+        <div><label>To Station</label><select id="topoToStation">${stationOptions}</select></div>
         <div><label>產線 ID（選填）</label><input id="topoLineId" placeholder="line-A"></div>
       </div>
-      <datalist id="topoNodeIds">${nodeIdOptions}</datalist>
       <button class="deploy-btn" onclick="addTopologyEdge()">新增</button>
     </div>
-    <div class="deploy-history">
-      <h4>待審核（AuditTrail 自動偵測，需人工核准才會出現在 plan() 檢索結果）</h4>
-      ${suggestedHtml}
-    </div>
-    <div class="deploy-history">
-      <h4>已核准</h4>
-      ${approvedHtml}
-    </div>`;
+    ${facilitiesHtml}`;
 }
 
 async function addTopologyEdge() {
-  const fromNodeId = document.getElementById('topoFromNode').value.trim();
-  const relation    = document.getElementById('topoRelation').value;
-  const toNodeId    = document.getElementById('topoToNode').value.trim();
-  const lineId      = document.getElementById('topoLineId').value.trim();
-  if (!fromNodeId || !toNodeId) { toast('From/To Node ID 必填', 'var(--amber)'); return; }
+  const facilityId    = document.getElementById('topoFacilityId').value;
+  const fromStationId = document.getElementById('topoFromStation').value;
+  const relation       = document.getElementById('topoRelation').value;
+  const toStationId    = document.getElementById('topoToStation').value;
+  const lineId          = document.getElementById('topoLineId').value.trim();
+  if (!facilityId) { toast('請先選擇場域', 'var(--amber)'); return; }
+  if (!fromStationId || !toStationId) { toast('From/To Station 必填', 'var(--amber)'); return; }
 
   try {
-    const res = await safeFetch(`${workflowPlanningUrl}/api/topology/edges`, {
+    const res = await safeFetch(`${topoBaseUrl()}/api/facilities/${encodeURIComponent(facilityId)}/edges`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fromNodeId, relation, toNodeId, ...(lineId ? { lineId } : {}) }),
+      body: JSON.stringify({ fromStationId, relation, toStationId, ...(lineId ? { lineId } : {}) }),
       timeout: 8000,
     });
     if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0, 120)}`); }
@@ -3105,16 +3155,17 @@ async function addTopologyEdge() {
   }
 }
 
-async function approveTopologyEdge(index) {
-  const edgeItem = lineTopologyState.suggested[index];
+async function approveTopologyEdge(facilityId, index) {
+  const facility = lineTopologyState.facilities.find(f => f.facilityId === facilityId);
+  const edgeItem = facility?.edges[index];
   if (!edgeItem) return;
 
   try {
-    const res = await safeFetch(`${workflowPlanningUrl}/api/topology/edges/approve`, {
+    const res = await safeFetch(`${topoBaseUrl()}/api/facilities/${encodeURIComponent(facilityId)}/edges/approve`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-User-Id': AGENT_ID },
       body: JSON.stringify({
-        fromNodeId: edgeItem.fromNodeId, relation: edgeItem.relation, toNodeId: edgeItem.toNodeId,
+        fromStationId: edgeItem.fromStationId, relation: edgeItem.relation, toStationId: edgeItem.toStationId,
       }),
       timeout: 8000,
     });

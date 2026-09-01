@@ -1,7 +1,8 @@
-import { describe, expect, it } from '@jest/globals';
+import { describe, expect, it, jest } from '@jest/globals';
 import { AuditTrail } from '../audit/AuditTrail';
-import { TopologyRegistry } from './TopologyRegistry';
 import { TopologySequenceDetector } from './TopologySequenceDetector';
+import type { AccountingClient } from '../planning/NLPlanningService';
+import type { FacilityIndexEntry } from './FacilityTopology.types';
 
 // recordEvent() always stamps real wall-clock time and can't take a custom
 // occurredAt, which would make ordering-sensitive tests flaky (two fast
@@ -37,49 +38,72 @@ function recent(offsetSeconds: number): string {
   return new Date(RECENT_ANCHOR_MS + offsetSeconds * 1000).toISOString();
 }
 
+/** node1 → 站 s1、node2 → 站 s2，同屬 fac-1 的假 facility index。 */
+const FAC_1_INDEX: FacilityIndexEntry = {
+  facilityId: 'fac-1',
+  name: 'Facility 1',
+  stations: [
+    { stationId: 's1', nodeId: 'node1', name: 'Station 1' },
+    { stationId: 's2', nodeId: 'node2', name: 'Station 2' },
+  ],
+};
+
+function makeAccounting(facilities: FacilityIndexEntry[] = [FAC_1_INDEX]): jest.Mocked<AccountingClient> {
+  return {
+    listNodeResources: jest.fn<AccountingClient['listNodeResources']>().mockResolvedValue({}),
+    getNodeResources: jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
+    listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue([]),
+    listFacilitiesForNodes: jest.fn<AccountingClient['listFacilitiesForNodes']>().mockResolvedValue(facilities),
+    getFacility: jest.fn<AccountingClient['getFacility']>().mockRejectedValue(new Error('not used in this test')),
+    suggestFacilityEdge: jest.fn<AccountingClient['suggestFacilityEdge']>()
+      .mockResolvedValue({} as never),
+  };
+}
+
 describe('TopologySequenceDetector', () => {
   it('suggests an edge once the same adjacency repeats past the threshold', async () => {
     // 為什麼重要：這是規格 §四「重複出現的序列模式」的核心行為——單一一次
     // node1→node2 不該被當成拓樸證據，門檻存在的意義就是過濾偶發雜訊。
     const audit = new AuditTrail(':memory:');
-    const topology = new TopologyRegistry(':memory:');
+    const accounting = makeAccounting();
     for (let i = 0; i < 3; i += 1) {
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node1', occurredAt: recent(i * 2) });
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node2', occurredAt: recent(i * 2 + 1) });
     }
-    const detector = new TopologySequenceDetector(audit, topology, { minOccurrences: 3 });
+    const detector = new TopologySequenceDetector(audit, accounting, { minOccurrences: 3 });
 
     const detected = await detector.run();
 
     expect(detected).toEqual([{ fromNodeId: 'node1', toNodeId: 'node2', occurrences: 3 }]);
-    const edge = topology.find('node1', 'upstream_of', 'node2');
-    expect(edge?.status).toBe('suggested');
-    expect(edge?.source).toBe('audit_trail_inference');
+    expect(accounting.listFacilitiesForNodes).toHaveBeenCalledWith(['node1', 'node2']);
+    expect(accounting.suggestFacilityEdge).toHaveBeenCalledWith('fac-1', {
+      fromStationId: 's1', relation: 'upstream_of', toStationId: 's2',
+    });
   });
 
   it('does not suggest below the occurrence threshold', async () => {
     const audit = new AuditTrail(':memory:');
-    const topology = new TopologyRegistry(':memory:');
+    const accounting = makeAccounting();
     for (let i = 0; i < 2; i += 1) {
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node1', occurredAt: recent(i * 2) });
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node2', occurredAt: recent(i * 2 + 1) });
     }
-    const detector = new TopologySequenceDetector(audit, topology, { minOccurrences: 3 });
+    const detector = new TopologySequenceDetector(audit, accounting, { minOccurrences: 3 });
 
     const detected = await detector.run();
 
     expect(detected).toEqual([]);
-    expect(topology.list()).toHaveLength(0);
+    expect(accounting.suggestFacilityEdge).not.toHaveBeenCalled();
   });
 
   it('does not count consecutive steps on the same node as an edge', async () => {
     const audit = new AuditTrail(':memory:');
-    const topology = new TopologyRegistry(':memory:');
+    const accounting = makeAccounting();
     for (let i = 0; i < 5; i += 1) {
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node1', occurredAt: recent(i * 2) });
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node1', occurredAt: recent(i * 2 + 1) });
     }
-    const detector = new TopologySequenceDetector(audit, topology, { minOccurrences: 3 });
+    const detector = new TopologySequenceDetector(audit, accounting, { minOccurrences: 3 });
 
     const detected = await detector.run();
 
@@ -90,43 +114,44 @@ describe('TopologySequenceDetector', () => {
     // 為什麼重要：派工失敗不代表兩個節點之間真的有拓樸關係，混進失敗案例
     // 會讓偵測結果失真。
     const audit = new AuditTrail(':memory:');
-    const topology = new TopologyRegistry(':memory:');
+    const accounting = makeAccounting();
     for (let i = 0; i < 3; i += 1) {
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node1', occurredAt: recent(i * 2) });
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node2', occurredAt: recent(i * 2 + 1), success: false });
     }
-    const detector = new TopologySequenceDetector(audit, topology, { minOccurrences: 3 });
+    const detector = new TopologySequenceDetector(audit, accounting, { minOccurrences: 3 });
 
     const detected = await detector.run();
 
     expect(detected).toEqual([]);
   });
 
-  it('does not re-suggest (or downgrade) an edge that is already approved', async () => {
+  it('skips adjacencies where no single facility knows both nodes', async () => {
+    // 為什麼重要：場域/站點要先有人工登記，自動偵測才有東西可以掛——這是
+    // 預期中的冷啟動行為，不是要當成錯誤處理。
     const audit = new AuditTrail(':memory:');
-    const topology = new TopologyRegistry(':memory:');
-    topology.upsertManual({ fromNodeId: 'node1', relation: 'upstream_of', toNodeId: 'node2' });
+    const accounting = makeAccounting([]); // 沒有任何場域認得這兩個節點
     for (let i = 0; i < 3; i += 1) {
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node1', occurredAt: recent(i * 2) });
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node2', occurredAt: recent(i * 2 + 1) });
     }
-    const detector = new TopologySequenceDetector(audit, topology, { minOccurrences: 3 });
+    const detector = new TopologySequenceDetector(audit, accounting, { minOccurrences: 3 });
 
-    await detector.run();
+    const detected = await detector.run();
 
-    const edge = topology.find('node1', 'upstream_of', 'node2');
-    expect(edge?.status).toBe('approved');
+    expect(detected).toEqual([]);
+    expect(accounting.suggestFacilityEdge).not.toHaveBeenCalled();
   });
 
   it('ignores events outside the lookback window', async () => {
     const audit = new AuditTrail(':memory:');
-    const topology = new TopologyRegistry(':memory:');
+    const accounting = makeAccounting();
     const oldTimestamp = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 天前
     for (let i = 0; i < 3; i += 1) {
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node1', occurredAt: new Date(oldTimestamp).toISOString() });
       insertTransferEvent(audit, { traceId: `trace-${i}`, nodeId: 'node2', occurredAt: new Date(oldTimestamp + 1000).toISOString() });
     }
-    const detector = new TopologySequenceDetector(audit, topology, { minOccurrences: 3, lookbackMs: 7 * 24 * 60 * 60 * 1000 });
+    const detector = new TopologySequenceDetector(audit, accounting, { minOccurrences: 3, lookbackMs: 7 * 24 * 60 * 60 * 1000 });
 
     const detected = await detector.run();
 

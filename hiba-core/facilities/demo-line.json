@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "facilityId": "demo-line",
+  "name": "示範產線 A",
+  "processDescription": "原料切割 -> CNC 加工 -> 品質檢測 -> 搬運 -> 產出報表，五站串接的示範產線流程。",
+  "stations": [
+    { "stationId": "cut",    "name": "切割站",     "nodeId": "node-1", "description": "原料裁切，輸出半成品交由 CNC 站加工。", "metadata": {} },
+    { "stationId": "cnc",    "name": "CNC 加工站", "nodeId": "node-2", "description": "精密加工半成品。", "metadata": {} },
+    { "stationId": "qc",     "name": "品質檢測站", "nodeId": "node-3", "description": "抽樣品質檢測，不合格品退回 CNC 站。", "metadata": {} },
+    { "stationId": "convey", "name": "搬運站",     "nodeId": "node-5", "description": "合格品搬運至報表站彙整。", "metadata": {} },
+    { "stationId": "report", "name": "報表站",     "nodeId": "node-4", "description": "彙整產出報表。", "metadata": {} }
+  ],
+  "edges": [
+    { "fromStationId": "cut",    "relation": "upstream_of", "toStationId": "cnc",    "lineId": "line-A", "status": "approved", "source": "manual", "metadata": {}, "updatedAt": "2026-08-31T00:00:00.000Z" },
+    { "fromStationId": "cnc",    "relation": "upstream_of", "toStationId": "qc",     "lineId": "line-A", "status": "approved", "source": "manual", "metadata": {}, "updatedAt": "2026-08-31T00:00:00.000Z" },
+    { "fromStationId": "qc",     "relation": "upstream_of", "toStationId": "convey", "lineId": "line-A", "status": "approved", "source": "manual", "metadata": {}, "updatedAt": "2026-08-31T00:00:00.000Z" },
+    { "fromStationId": "convey", "relation": "upstream_of", "toStationId": "report", "lineId": "line-A", "status": "approved", "source": "manual", "metadata": {}, "updatedAt": "2026-08-31T00:00:00.000Z" }
+  ],
+  "updatedAt": "2026-08-31T00:00:00.000Z"
+}

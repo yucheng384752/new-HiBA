@@ -288,6 +288,9 @@ const mockAccounting: AccountingClient = {
   listNodeResources: async () => ({}),
   getNodeResources: async () => [],
   listNodes: async () => [],
+  listFacilitiesForNodes: async () => [],
+  getFacility: async () => { throw new Error('not used in this test'); },
+  suggestFacilityEdge: async () => { throw new Error('not used in this test'); },
 };
 
 let remoteServer: AgentServer;

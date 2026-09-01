@@ -11,8 +11,6 @@ import type { ExecutionPlan } from '../types/hiba.types';
 import type { WorkflowStore } from './WorkflowStore';
 import { verifyCriticalEvent } from '../audit/AuditTrail';
 import type { AuditTrail, CriticalEventType } from '../audit/AuditTrail';
-import { HiBAError } from '../core/ScopedToolbox';
-import type { TopologyRegistry, TopologyRelation, TopologyEdgeStatus } from '../topology/TopologyRegistry';
 import { validatePlan } from '../planning/validatePlan';
 import { toToolSpec } from '../core/defineTool';
 import { createToolFailure } from '../core/errors';
@@ -156,13 +154,6 @@ export interface AgentServerOptions {
   orchestrator?: OrchestratorRunner;
   workflowStore?: WorkflowStore;
   auditTrail?: AuditTrail;
-  /**
-   * When provided, enables:
-   *   GET  /api/topology/edges         → list edges (?status=&lineId=)
-   *   POST /api/topology/edges         → manual upsert, immediately 'approved'
-   *   POST /api/topology/edges/approve → approve a 'suggested' edge
-   */
-  topology?: TopologyRegistry;
 }
 
 /**
@@ -404,82 +395,6 @@ export class AgentServer {
           }
           return;
         }
-      }
-
-      // ── /api/topology/edges ──────────────────────────────────────────────────
-      // 規格：實作規格/plan()_LLM生成品質改善與輕量RAG檢索設計.md §四
-
-      if (method === 'GET' && urlPath === '/api/topology/edges') {
-        if (!this.options.topology) {
-          jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Topology registry not configured on this server');
-          return;
-        }
-        const params = new URLSearchParams((req.url ?? '').split('?')[1] ?? '');
-        const status = params.get('status');
-        if (status !== null && status !== 'suggested' && status !== 'approved') {
-          jsonError(res, 400, 'REQUEST_INVALID', '"status" must be "suggested" or "approved"');
-          return;
-        }
-        const lineId = params.get('lineId');
-        json(res, 200, this.options.topology.list({
-          ...(status ? { status: status as TopologyEdgeStatus } : {}),
-          ...(lineId ? { lineId } : {}),
-        }));
-        return;
-      }
-
-      if (method === 'POST' && urlPath === '/api/topology/edges') {
-        if (!this.options.topology) {
-          jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Topology registry not configured on this server');
-          return;
-        }
-        const body = (await readBody(req)) as {
-          fromNodeId?: string; relation?: string; toNodeId?: string;
-          lineId?: string; metadata?: Record<string, unknown>;
-        };
-        if (!body.fromNodeId || !body.relation || !body.toNodeId) {
-          jsonError(res, 400, 'REQUEST_INVALID', '"fromNodeId", "relation", and "toNodeId" are required');
-          return;
-        }
-        try {
-          const edge = this.options.topology.upsertManual({
-            fromNodeId: body.fromNodeId,
-            relation: body.relation as TopologyRelation,
-            toNodeId: body.toNodeId,
-            ...(body.lineId ? { lineId: body.lineId } : {}),
-            ...(body.metadata ? { metadata: body.metadata } : {}),
-          });
-          json(res, 200, edge);
-        } catch (error) {
-          if (error instanceof HiBAError) { jsonError(res, 400, error.errorCode, error.message); return; }
-          throw error;
-        }
-        return;
-      }
-
-      if (method === 'POST' && urlPath === '/api/topology/edges/approve') {
-        if (!this.options.topology) {
-          jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Topology registry not configured on this server');
-          return;
-        }
-        const approvedBy = (req.headers['x-user-id'] as string | undefined)?.trim();
-        if (!approvedBy) { jsonError(res, 400, 'REQUEST_INVALID', 'X-User-Id is required'); return; }
-        const body = (await readBody(req)) as { fromNodeId?: string; relation?: string; toNodeId?: string };
-        if (!body.fromNodeId || !body.relation || !body.toNodeId) {
-          jsonError(res, 400, 'REQUEST_INVALID', '"fromNodeId", "relation", and "toNodeId" are required');
-          return;
-        }
-        try {
-          const edge = this.options.topology.approve(body.fromNodeId, body.relation, body.toNodeId);
-          json(res, 200, { ...edge, approvedBy });
-        } catch (error) {
-          if (error instanceof HiBAError) {
-            jsonError(res, error.errorCode === 'RESOURCE_NOT_FOUND' ? 404 : 400, error.errorCode, error.message);
-            return;
-          }
-          throw error;
-        }
-        return;
       }
 
       // ── /api/intent ──────────────────────────────────────────────────────────
