@@ -7,7 +7,7 @@ reviewer: "claude"
 priority: "high"
 created_by: "claude"
 created_at: "2026-09-03T21:40:00+08:00"
-updated_at: "2026-09-03T23:10:00+08:00"
+updated_at: "2026-09-03T23:45:00+08:00"
 role_priority:
   implementation: "codex"
   review: "claude"
@@ -137,6 +137,128 @@ Codex 在同一個 session 稍早才成功寫過其他 thread 檔案，判斷比
 暫時性問題，不是這個檔案／路徑本身有結構性障礙。實作階段重新派工時，
 如果又遇到同樣的唯讀錯誤，不要重複嘗試超過一次，直接回報，改由 Claude
 接手把 Codex 給的內容手動寫入（就像這次一樣）。
+
+## Worked-example 修正提案（Codex，2026-09-03；文字提案，未寫檔/未跑 apply_patch）
+
+依照使用者核准的派工要求（見上方 Open Questions「已決定」），Codex 針對
+方向 A（換掉 Example 2 字面值）與方向 B（新增 local worked example）
+各自提出具體草稿與風險評估，這次沒有嘗試寫檔案，內容由 Claude 手動
+轉貼進本 thread。
+
+**總結建議**：先單獨評估方向 A。如果 A 就能修好 local 路由且沒有回歸，
+只上 A，不需要 B。如果 A 不夠，再評估 A+B 一起上。不建議單獨上 B。
+A 跟 B 是互補關係，不是互斥：A 移除誤導性的既有字面值範例、擾動最小；
+B 補一個正面的 local 範例，但有讓模型把 `material.*` 操作過度導向
+`local` 的風險；如果保留舊的 `node1` Example 2 又加上 B，會讓同一個
+工具家族出現兩個互相競爭的範例。
+
+**方向 A — 替換 Example 2 字面值**
+
+具體 diff：把 Example 2 的 task 文字與字面值換成描述性 placeholder
+（`<TASK_NODE_ID>`、`<TASK_FILE_PATH>`），JSON 範例裡的 `nodeId`／
+`filePath` 也同步換成這兩個 placeholder，並在 Example 2 標題註記
+「replace `<...>` from the task」。Codex 特別說明：選描述性
+placeholder（而非泛用的 `<NODE>`/`<FILE>`）是刻意的，因為更容易被
+模型正確理解成「要替換」而非「照抄」。
+
+長度影響：約 +89 字元/+89 UTF-8 bytes（約 20-30 token，需用實際
+tokenizer 或 Ollama `prompt_eval_count` 確認），範例數量、順序、
+工具名稱、依賴結構、JSON 形狀都不變——是三個候選裡擾動最小的。
+
+風險評估：低到中。緩解因素：Example 1、Example 3 仍保留真實 `node1`
+範例；Example 2 仍然示範「明確指定的節點要傳遞到每個相依步驟」這個
+教訓；Rule 3 仍然禁止用 local 取代明確指定的節點。具體風險：(1) 模型
+可能把 placeholder 字面值（`<TASK_NODE_ID>` 等）原樣輸出，驗證時必須
+把這種洩漏視為失敗；(2) 拿掉 `material.verifyFile→protectFile` 唯一
+範例裡的具體 `node1`，可能弱化這條 material 工作流程本身的真實節點
+路由能力；(3) A 有可能因為只是移除壞錨點、沒提供正面的 local 範例，
+仍然修不好 local case。
+
+**方向 B — 新增專屬 local worked example**
+
+具體草稿：在 Example 2 後面插入新的「Example 2b」（用 2b 是為了不用
+重新編號 Example 3 及其引用），情境是「保護檔案 /uploads/report.xml」
+（未指定節點）、Available Tools 只有 `material.protectFile`、沒有
+online 節點掛載或可安裝，正確輸出是單一步驟、`nodeId:"local"`。
+Codex 特別指出：刻意選用目前正在失敗的 `material.protectFile` 當
+範例工具，是為了直接對抗目前觀察到的照抄行為；換成別的工具雖然能
+降低「同工具」偏誤，但可能沒辦法真正克服 live 驗證看到的那種照抄。
+
+長度影響：約 +566 字元/+604 UTF-8 bytes（約 130-170 token），worked
+example 從 3 個增加到 4 個，且是同一個 `material.protectFile` 工具
+的第二個範例、還帶一個具體 `nodeId:"local"` 輸出——比 A 的 prompt
+形狀改動明顯更大。
+
+風險評估：中到高。具體風險：(1) 因為觀察到的模型會積極照抄同工具
+範例，可能導致原本應該路由到真實節點的 `material.protectFile`／
+`verifyFile` 任務被誤導去用 `local`；(2) 可能過度泛化，只要任務沒
+指定節點就傾向用 `local`，即使其實有 online 可執行或可安裝的節點；
+(3) 可能連 `/uploads/report.xml` 這個範例路徑本身都被照抄（NL
+workflow 的 attachment enrichment 在某些流程可能會蓋掉這個問題，
+但必須額外檢查模型的原始輸出，不能只看 enrichment 後的結果）；
+(4) 範例放在 Example 2 之後會有「鄰近效應／同工具定錨」，如果之後
+想改放別的位置，那本身又是另一個要單獨驗證的 prompt 形狀變數，
+不該和第一輪實驗混在一起做。
+
+**組合策略（建議順序）**：1. 先 benchmark 目前已 commit 的 Rule-3
+基準版本；2. 單獨 benchmark A；3. 如果 A 通過所有驗收門檻，就停在
+A，不需要 B；4. 如果 A 仍無法修好 local 路由，再 benchmark A+B；
+5. B 單獨的版本可以測、僅供診斷用途，不建議單獨上線。A+B 預期會比
+單獨 B 更穩：A 移除同一個 material 工作流程裡衝突的具體 `node1`
+範例，B 補上缺少的具體 local 範例；代價是更長的 prompt 跟更高的
+local 過度路由風險。
+
+**驗證計畫**：
+1. 每個候選版本（baseline／A／B(僅診斷)／A+B）都必須完全透過
+   `tools/print-system-prompt.ts` 重建正式生產 prompt，用同一組真實
+   `resources`/`nodes`/`tools`/`requestedAt`（沿用當初失敗請求的
+   那組），比對字元數/UTF-8 bytes/tokenizer 或 Ollama
+   `prompt_eval_count`，確認除了提案改動之外沒有其他差異，也沒有
+   context 被截斷。特別提醒：`benchmark_quality.py` 是吃 JSONL 裡
+   已經存好的 `system` 文字，每個候選版本都要透過
+   `build_c6_scenarios.py`/`print-system-prompt.ts` 重新產生資料集，
+   不能沿用舊的 JSONL，否則根本沒測到候選 prompt。
+2. 針對 local case，先用 `temperature=0` 直接查 Ollama 拿原始輸出，
+   再測真實 `/api/plan`：(a) 沒有可用 online 節點時「保護檔案
+   /tmp/local-input.xml」——預期單一 `material.protectFile` 步驟、
+   `nodeId:"local"`、路徑跟任務裡的完全一致；(b) 兩步驟 local
+   鏈「先驗證 /tmp/local-input.xml，通過後再保護」——預期
+   `verifyFile→protectFile` 都在 local、`dependsOn` 正確、沒有照抄
+   範例路徑；(c) 原本失敗的附件工作流程「保護這份附件檔案並驗證
+   完整性」——預期都在 local、`/api/plan` 通過驗證、attachment
+   enrichment 正確替換路徑。只要原始輸出出現 `node1`、`a.xml`、
+   `<TASK_NODE_ID>`、`<TASK_FILE_PATH>`，或（沒有在任務裡出現過的）
+   B 範例路徑，就判定該候選版本不合格。
+3. 真實節點路由回歸案例：「查詢 node1 的機台狀態」預期路由到
+   `node1`；明確指定 `node8` 的 material 兩步驟鏈，兩步都要留在
+   `node8`；明確指定某個掛載該工具的 online 節點時，`material.
+   protectFile` 要用那個節點、絕不是 local；沒指定節點但有 online
+   節點掛載該工具時，要用那個 online 節點、不是 local；沒指定節點、
+   工具沒掛載但有 online 且 `canInstall=true` 的節點時，要維持現有
+   的可安裝節點路由、不是 local。
+4. 明確指定節點的安全案例：明確指定不存在的節點（沿用既有 C6 S13）、
+   明確指定離線節點且沒有合法 delegation 對象、明確指定節點但要求
+   一個本機可執行的 material 工具——每個案例都要斷言模型不會偷偷
+   換成 local，錯誤/拒絕/既有 delegation 行為才是可接受結果（比照
+   目前的 gold 標準）。
+5. 完整 prompt-shape benchmark：`python
+   training/data/build_c6_scenarios.py` 接著 `python
+   benchmark_quality.py hiba-planner:v1-optimized --dataset
+   training/data/hiba-c6-scenarios.jsonl --schema-format`，每個候選
+   版本都要用各自重新產生的 JSONL，特別關注 C6 裡的 material/
+   明確節點案例（S01、S04、S08、S10、S16、S19）以及整體節點路由
+   分數。
+
+**驗收門檻**：所有 targeted local case 都選到 local、通過
+`validatePlan()`、工具/輸入/依賴都正確；所有明確指定節點的案例都
+用到要求/預期的真實節點、絕不是 local；沒有任何原本正確的 C6 案例
+因此新增節點路由失敗；整體節點分數與 exact-match 分數不能低於
+baseline；原本那個真實失敗的 live request，在真實 AgentServer 重啟
+後要能成功；獲勝候選版本的 targeted case 要重複跑三次，不能只憑一次
+prompt 字串層級的單元測試當證據。如果 A 通過所有門檻，只上 A；如果
+A 沒修好 local 路由但 A+B 通過所有門檻，上 A+B；如果 A+B 造成任何
+「明確指定節點卻被路由到 local」的回歸，B 要打回，重新設計範例，
+不要反過來削弱 Rule 3。
 
 ## 實作派工與再次唯讀錯誤（Codex，2026-09-03）
 
@@ -285,3 +407,7 @@ prompt 裡「Example 2」worked example 的字面值（`node1`/`a.xml`）對這�
     4. **不要在這次派工中直接寫檔案或跑 apply_patch**——先前兩次都遇到
        workspace read-only，這次先只要求文字提案，避免重複踩雷；提案
        內容確認方向後，再開下一輪派工做實作。
+  - **提案已收到**：見上方「Worked-example 修正提案」小節。Codex 建議
+    先單獨評估方向 A、A 不夠再上 A+B、不建議單獨上 B。等待使用者/
+    Claude 核准要不要照這個順序實作，以及是否要求先跑 A 的
+    `benchmark_quality.py` A/B 對照再決定要不要繼續做 B。
