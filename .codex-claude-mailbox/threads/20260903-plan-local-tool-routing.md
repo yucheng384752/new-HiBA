@@ -7,7 +7,7 @@ reviewer: "claude"
 priority: "high"
 created_by: "claude"
 created_at: "2026-09-03T21:40:00+08:00"
-updated_at: "2026-09-04T00:05:00+08:00"
+updated_at: "2026-09-04T01:20:00+08:00"
 role_priority:
   implementation: "codex"
   review: "claude"
@@ -344,6 +344,108 @@ prompt 去問真正的模型，只驗證了新文字有沒有被組進去。這�
 但視為「必要但不足夠」的中間增量，會用誠實的 commit message 說明，
 本 thread 狀態繼續維持非 completed，不進 review_requested。
 
+## Claude 實作方向 A、live 驗證、以及方向 B 揭露的 context window 硬限制（2026-09-04）
+
+Codex 因為 sandbox 唯讀，只準備了方向 A 的完整 patch 文字（同一輪，第
+三次遇到同樣的唯讀錯誤，這次沒有再模擬「通過」，誠實回報「沒有落地、
+沒有測試、沒有查詢任何 live 服務」），由 Claude 手動套用、驗證。
+
+**方向 A 落地與驗證方法論修正**：套用 Codex 準備的 patch 後
+（`HttpLLMClient.ts` Example 2 換成 `<TASK_NODE_ID>`/`<TASK_FILE_PATH>`
+placeholder），typecheck 乾淨、`npm test` 201 通過。用
+`print-system-prompt.ts` 重建 prompt，長度增加 89 bytes，跟 Codex
+估算完全吻合。
+
+第一次用 `temperature=0` 直接查 Ollama 做 targeted local case 驗證時，
+**發現一個嚴重的方法論錯誤**：我用純 `/v1/chat/completions` +
+`messages`/`temperature` 直接查，沒有帶上正式環境實際會送的
+`response_format`（JSON Schema grammar-constrained decoding，見
+`HttpLLMClient.ts` 的 `openaiBody()`）。結果模型陷入無窮迴圈，重複輸出
+同一個 JSON 區塊直到打到 `max_tokens`（`finish_reason:"length"`，
+`completion_tokens:40960`）。一開始誤以為這是方向 A 造成的新 regression
+（比「不夠」更嚴重的「壞掉」），後來意識到根因是**我自己的診斷請求少帶
+了 `response_format` schema**——正式環境有 grammar-constrained decoding
+保護，不會發生這種失控重複；沒有 schema 的裸查詢不能代表正式行為。
+新增了 `hiba-core/tools/print-plan-schema.ts`（比照
+`print-system-prompt.ts` 的模式，把 `buildPlanJsonSchema()` 橋接給
+非 TS 呼叫者／手動診斷用），之後所有直接查模型的診斷都必須帶上這個
+schema 當 `response_format`，否則結果不能採信。**這是一個要記住的
+方法論教訓，不只是這次的修正**。
+
+用正確方法論（帶 schema）重新查詢方向 A 版本的 prompt：11.9 秒完成，
+`finish_reason:"stop"`，輸出
+`{"nodeId":"node1","toolName":"material.protectFile","input":{"keepFile":true}}`
+（沒有 `filePath`）——**確認方向 A 單獨不足以修正 local 路由**：
+`nodeId` 仍然是字面值 `"node1"`，這次是從 Example 1／Example 3（兩者
+都還保留 `nodeId:"node1"` 這個字面值，因為方向 A 依照核准範圍只改了
+Example 2）抄來的，不是從 Example 2。這正是 Codex 自己在方向 A 風險
+評估裡提過的疑慮——「拿掉 Example 2 的具體值不代表模型會停止照抄，因為
+prompt 裡到處都是 `node1` 這個通用範例值」，這次證實成立。也跟真實
+`/api/plan` 重送同一個請求的結果一致（`AGENT_NOT_REGISTERED` +
+`filePath` 的 `INPUT_REQUIRED`）。
+
+**依照使用者事先核准的「A 不夠就做 A+B」，Claude 直接套用方向 B**
+（Codex 提案的 Example 2b，`nodeId:"local"`），typecheck／測試都過，
+prompt 長度增加 659 bytes（比 Codex 估算的 604 略高，屬正常範圍，
+是我實際寫的文字跟 Codex 草稿字句略有出入）。用同樣「帶 schema」的
+正確方法論重新查詢方向 A+B 版本——**這次直接被 Ollama 拒絕**：
+
+```
+HTTP 400: request (4192 tokens) exceeds the available context size
+(4096 tokens), n_ctx=4096
+```
+
+用 `ollama show hiba-planner:v1-optimized --modelfile` 確認這個模型的
+Modelfile 沒有設定 `PARAMETER num_ctx`，代表用的是 Ollama 目前的預設
+（這個部署上實測是 4096）。方向 A 版本的 prompt 已經是 4021
+`prompt_tokens`——距離 4096 上限只剩約 75 個 token 的餘裕，方向 B 增加
+的 130-170 token（Codex 估算）或實測的更多，遠遠超過這個餘裕，直接
+把請求打爆。
+
+**這比「方向 B 風險評估裡預期的最壞情況（可能誤導模型把真實節點任務
+導向 local）」更嚴重**：不是「效果不確定」，是**任何用到完整 37 個
+工具目錄的請求，只要加上方向 B 的完整範例文字，就會確定性地整個
+request 失敗（HTTP 400），不分任務內容**。已經把 `HttpLLMClient.ts`／
+`HttpLLMClient.test.ts` 裡方向 B 的變更 revert 掉，退回方向 A-only
+的狀態（typecheck、201 tests 都重新確認過），避免把一個確定會炸掉
+正式環境的版本留在工作目錄裡誤植。
+
+**結論修正（第二次）**：這個 thread 原本核准的「A 不夠就 A+B」路線，
+現在已知在目前的推論端設定（`n_ctx=4096`、無 override）下**技術上不
+可行**，不是「要不要冒風險」的問題，是硬性的 context window 限制。
+往下至少有三條候選方向，都超出這個 thread 原本核准的範圍，需要重新
+討論／核准：
+
+1. **調高 `n_ctx`**（Modelfile 加 `PARAMETER num_ctx <更大的值>` 並
+   重建模型，或透過 `OLLAMA_CONTEXT_LENGTH` 環境變數調整伺服器預設）。
+   但這牽動這個 session 已經記錄過的 v1c/v1c2 訓練脈絡——訓練時的
+   `cutoff_len`（v1 是 4096，v1c2 嘗試過更長但反覆訓練失敗，見
+   `plan_LLM_訓練清單.md`）跟推論時的 `num_ctx` 理論上該對齊，推論端
+   單方面調大 `num_ctx` 而訓練沒有用更長的 context 訓練過，有可能讓
+   超出訓練分佈的那段 prompt 內容的品質不可預期地下降（這正是這個
+   session 已經確立的「這個模型對 prompt 形狀特別敏感」風險的另一種
+   展現形式）。這個決定牽涉基礎設施跟訓練歷史，不該由 Claude 單方面
+   決定執行。
+2. **不加新範例，改成在別處縮減 prompt 騰出空間**——例如這個 repo
+   已經在做的 RAG/拓樸檢索設計（`plan()_LLM生成品質改善與輕量RAG檢索
+   設計.md`，`orchestrator.retrieveContext`）如果先落地，Available
+   Tools 清單不用每次塞進完整 37 個工具，理論上能空出遠大於方向 B
+   所需的 token 餘裕。但那是另一條独立、更大範圍的工作，不是這個
+   thread 能單獨決定要不要提前插隊做的。
+3. **只留方向 A，接受它不能完全修正問題**，local-only 工具任務仍會
+   在少數情況下失敗，先用其他方式繞過（例如在 UI／NL workflow 層
+   做啟發式判斷，偵測「任務只涉及 local-only 工具且未指定節點」時
+   直接跳過 LLM 規劃，用固定樣板組出 `nodeId:"local"` 的 plan，不
+   依賴 LLM 自己選對）——這其實呼應了這個 thread 最早提過但沒有深入
+   的「合成虛擬 local 節點」方向 1 的精神，只是換成在 `plan()` 前後
+   做確定性處理，而非塞進 prompt 讓 LLM 自己決定。
+
+方向 A 的程式碼變更（`HttpLLMClient.ts` Example 2 placeholder + 對應
+測試）維持在工作目錄，尚未 commit——雖然已知不足以完全解決問題，但
+語意正確、也是任何後續方向的合理基礎，是否要先 commit 這個增量會在
+下一輪跟使用者確認後處理。方向 B 的程式碼已經 revert，不留在工作
+目錄。
+
 # Review Findings
 
 （尚未審查——本 thread 還沒有 Codex 實作可供審查）
@@ -367,6 +469,17 @@ A（換掉 Example 2 字面值），跑完驗證計畫（`print-system-prompt.ts
 但若又遇到 workspace read-only，比照先前約定：不重試超過一次，改成
 輸出完整文字內容交給 Claude 手動套用。
 
+**新狀態（Claude，2026-09-04）**：方向 A 已落地驗證，確認單獨不足以
+解決問題（見上方「Claude 實作方向 A、live 驗證、以及方向 B 揭露的
+context window 硬限制」）。依照使用者已核准的「A 不夠就做 A+B」，
+Claude 直接套用方向 B 做驗證，但發現方向 B 會讓 prompt 超過這個模型
+部署的 `n_ctx=4096` 上限，導致 HTTP 400、請求整個失敗——這不是原本
+核准範圍內「風險評估後接受」的情境，是技術上直接不可行，已經把方向
+B 的程式碼 revert 掉。**這個發現使得原本核准的「A 不夠就 A+B」路線
+本身失效，需要使用者對三個新候選方向（調高 num_ctx／先做 RAG 縮減
+prompt／只留方向 A 並在 plan() 前後做確定性繞過）重新做一次決定，
+不能沿用現有核准繼續走下去。**
+
 # Session Summary
 
 已用真實 Ollama/Accounting/hiba-agent 三個 live 服務，驗證出這個缺口的
@@ -383,6 +496,17 @@ prompt 裡「Example 2」worked example 的字面值（`node1`/`a.xml`）對這�
 生產 prompt 去問真正的模型。目前 `HttpLLMClient.ts`/`.test.ts` 的改動
 保留但不 commit 為「已解決」，thread 繼續維持非 completed 狀態，等待
 下一步方向（處理 worked example 本身）重新討論／核准。
+
+**更新（2026-09-04）**：方向 A 已落地驗證，確認單獨不足（模型仍從
+Example 1/3 抄 `node1`）。依核准邏輯進到方向 A+B，但方向 B 讓 prompt
+超出這個模型部署的 `n_ctx=4096`，導致 HTTP 400、請求整個失敗——這是
+比「效果不確定」更嚴重的「確定性壞掉」，已 revert 方向 B。驗證過程中
+也發現並修正一個方法論問題：不帶 `response_format`／JSON Schema 的
+裸模型查詢，跟正式環境的 grammar-constrained decoding 行為不同，不能
+拿來當作正式行為的證據（新增 `tools/print-plan-schema.ts` 修正這個
+診斷缺口）。原本核准的「A 不夠就 A+B」路線本身失效，需要使用者對
+調高 num_ctx／先做 RAG 縮減 prompt／只留方向 A 做確定性繞過，這三個
+新方向重新決定。
 
 # Open Questions
 
