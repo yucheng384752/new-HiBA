@@ -1,0 +1,58 @@
+### model
+model_name_or_path: meta-llama/Llama-3.1-8B-Instruct
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target: all
+
+### dataset
+dataset: hiba_workflow_v1
+dataset_dir: ./training
+template: llama3
+# v1b (cutoff_len:12288) was built around the old raw-JSON-context prompt
+# format, which made every example ~9.4k-10.1k tokens. gen-training-data.ts
+# now builds `system` with the real buildDefaultSystemPrompt() (compact
+# per-tool summaries, matching production) instead of dumping the full
+# ToolSpec JSON -- real measured length across all 320 rows is now
+# min=3578, p50=3719, p90=3968, max=3990 (see plan_LLM_訓練清單.md §十四).
+# 4608 leaves ~15% headroom over the observed max for the llama3 chat
+# template's role-marker overhead.
+cutoff_len: 4608
+overwrite_cache: true
+preprocessing_num_workers: 1
+
+### output
+# v1b never completed a single optimizer step (killed by GPU driver TDR
+# resets at the old 12288 cutoff_len -- see §十四), so there's no usable
+# checkpoint to preserve there. New dir anyway for a clean run.
+output_dir: ./training/hiba-planner-v1c-lora
+logging_dir: ./training/logs-v1c
+logging_steps: 5
+save_steps: 5
+plot_loss: true
+overwrite_output_dir: true
+
+### train
+# batch/grad_accum reverted towards the original standard config now that
+# sequence length is back near the original range (was 1/16 in v1b to fit
+# the since-abandoned 12288 cutoff_len).
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 0.0001
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+seed: 42
+
+### eval
+val_size: 0.1
+per_device_eval_batch_size: 2
+eval_strategy: steps
+eval_steps: 20

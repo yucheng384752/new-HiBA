@@ -354,7 +354,7 @@ test('POST /api/plan without task returns 400', async () => {
 test('POST /api/summarize returns validated natural-language result', async () => {
   const res = await request(port, 'POST', '/api/summarize', {
     task: '確認 m2 的 CNC-01 機台狀態',
-    run: { steps: [{ stepId: 'S1', result: { success: true } }] },
+    run: { steps: [{ stepId: 'S1', nodeId: 'm2', toolName: 'machine.queryStatus', result: { success: true } }] },
   });
   expect(res.status).toBe(200);
   expect(res.body).toEqual({

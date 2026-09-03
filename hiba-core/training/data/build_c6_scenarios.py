@@ -17,11 +17,32 @@ runtime schema (documented here, not silently done):
   ScopedToolbox permission restriction described in the scenario -- the
   planner never sees man.loginOperator as an option, matching how the real
   runtime would present it to a restricted caller
+- machine.calculateOee / orchestrator.getAuditSummary's `timeRange` was
+  originally declared (and used in S06/S11/S20) as a bare string ("2026-05",
+  "last-5min") -- the real runtime schema is {from, to} ISO 8601, same as
+  tools/gen-training-data.ts. Fixed here to the object shape; the values are
+  a fixed placeholder range for this static gold-answer set, not a computed
+  "now" (REQUESTED_AT below is fixed too -- see plan_LLM_訓練清單.md §十二
+  for the separate current-time-anchor mechanism that would be needed for
+  real relative-time reasoning).
+- each row's `system` field is built by shelling out to
+  tools/print-system-prompt.ts, which calls the real
+  buildDefaultSystemPrompt() (packages/hiba-agent/src/planning/
+  HttpLLMClient.ts) -- the exact prompt production sends, not a
+  hand-maintained copy. `context` carries the raw {resources, nodes, tools}
+  for this script's own bookkeeping / benchmark_quality.py's schema-
+  constrained decoding, but is NOT fed to the model. See §十四 for why the
+  previous raw-JSON-in-the-prompt format was replaced.
+- context()'s scoped-tools path (S18) also filters RESOURCES/NODES to the
+  same allowed set -- the original version only filtered `tools`, so nodes
+  kept advertising man.* resources with no corresponding ToolSpec in the
+  scoped catalog (found while wiring up the point above, fixed here).
 
 Run: python training/data/build_c6_scenarios.py
 """
 
 import json
+import subprocess
 from pathlib import Path
 
 OUT_PATH = Path(__file__).parent / "hiba-c6-scenarios.jsonl"
@@ -30,6 +51,12 @@ PROTOCOL_VERSION = "1.0"
 string = {"type": "string"}
 number = {"type": "number"}
 boolean = {"type": "boolean"}
+time_range = {
+    "type": "object",
+    "properties": {"from": string, "to": string},
+    "required": ["from", "to"],
+    "additionalProperties": False,
+}
 
 
 def tool(name, description, properties, required=None, action="read"):
@@ -54,7 +81,7 @@ TOOLS = [
     tool("material.inspectIncoming", "進料檢驗", {"lotId": string, "inspectionResult": string}, ["lotId"], "write"),
     tool("material.fetchBom", "取得產品 BOM 清單", {"productId": string}, ["productId"]),
     tool("machine.queryStatus", "查詢機台狀態", {"machineId": string}, ["machineId"]),
-    tool("machine.calculateOee", "計算 OEE", {"machineId": string, "timeRange": string}, ["machineId", "timeRange"]),
+    tool("machine.calculateOee", "計算 OEE", {"machineId": string, "timeRange": time_range}, ["machineId", "timeRange"]),
     tool("machine.checkCalib", "確認校正狀態", {"machineId": string}, ["machineId"]),
     tool("man.loginOperator", "操作員登入", {"employeeId": string, "passwordHash": string}, ["employeeId"], "write"),
     tool("man.verifyOperatorCert", "驗證操作員技能證照", {"employeeId": string, "skillCode": string}, ["employeeId", "skillCode"]),
@@ -66,7 +93,7 @@ TOOLS = [
     tool("env.readTemperature", "讀取溫度", {"sensorId": string}, ["sensorId"]),
     tool("env.readHumidity", "讀取濕度", {"sensorId": string}, ["sensorId"]),
     tool("orchestrator.installTool", "安裝工具到節點", {"toolName": string, "version": string}, ["toolName"], "write"),
-    tool("orchestrator.getAuditSummary", "取得稽核摘要", {"timeRange": string}, ["timeRange"]),
+    tool("orchestrator.getAuditSummary", "取得稽核摘要", {"timeRange": time_range}, ["timeRange"]),
 ]
 TOOL_BY_NAME = {t["name"]: t for t in TOOLS}
 
@@ -105,7 +132,19 @@ RESOURCES = {n["nodeId"]: n["resources"] for n in NODES}
 
 
 def context(tools=TOOLS):
-    return {"protocolVersion": PROTOCOL_VERSION, "resources": RESOURCES, "nodes": NODES, "tools": tools}
+    # Pre-existing gap (found while wiring up the real system-prompt builder,
+    # see plan_LLM_訓練清單.md §十四): a scoped `tools` override (S18) used to
+    # only filter the tools list -- RESOURCES/NODES stayed the shared global
+    # built from ALL_TOOL_NAMES, so nodes kept "advertising" man.* resources
+    # with no corresponding ToolSpec in the scoped catalog. Filter resources
+    # to the same allowed set so the scoped context is actually consistent.
+    if tools is TOOLS:
+        resources, nodes = RESOURCES, NODES
+    else:
+        allowed = {t["name"] for t in tools}
+        resources = {node_id: [r for r in items if r["name"] in allowed] for node_id, items in RESOURCES.items()}
+        nodes = [{**n, "resources": [r for r in n["resources"] if r["name"] in allowed]} for n in NODES]
+    return {"protocolVersion": PROTOCOL_VERSION, "resources": resources, "nodes": nodes, "tools": tools}
 
 
 def step(step_id, tool_name, node_id, input_, depends_on=None):
@@ -139,7 +178,7 @@ SCENARIOS = [
      ])),
     ("S06", "計算 node4 本月的 OEE，然後記錄稽核結果", context(),
      plan([
-         step("S1", "machine.calculateOee", "node4", {"machineId": "node4", "timeRange": "2026-05"}),
+         step("S1", "machine.calculateOee", "node4", {"machineId": "node4", "timeRange": {"from": "2026-05-01T00:00:00Z", "to": "2026-05-31T23:59:59Z"}}),
          step("S2", "method.recordAudit", "node4", {"auditType": "OEE_MONTHLY", "result": "{{S1.output}}", "notes": "月度設備效率稽核"}, ["S1"]),
      ])),
     ("S07", "料號 PN-500 的新批次到貨，執行進料檢驗、查 BOM 確認料件，再驗證 IATF 合規", context(),
@@ -166,7 +205,7 @@ SCENARIOS = [
     ("S11", "查詢 node11 的 OEE", context(),
      plan([
          step("S1", "orchestrator.installTool", "node11", {"toolName": "machine.calculateOee", "version": "latest"}),
-         step("S2", "machine.calculateOee", "node11", {"machineId": "node11", "timeRange": "2026-05"}, ["S1"]),
+         step("S2", "machine.calculateOee", "node11", {"machineId": "node11", "timeRange": {"from": "2026-05-01T00:00:00Z", "to": "2026-05-31T23:59:59Z"}}, ["S1"]),
      ])),
     ("S12", "查詢 node4 到 node6 的機台狀態，能查多少算多少", context(),
      plan([
@@ -218,15 +257,44 @@ SCENARIOS = [
          step("S3", "machine.queryStatus", "node3", {"machineId": "node3"}),
          step("S4", "machine.queryStatus", "node4", {"machineId": "node4"}),
          step("S5", "machine.queryStatus", "node5", {"machineId": "node5"}),
-         step("S6", "orchestrator.getAuditSummary", "node1", {"timeRange": "last-5min"}, ["S1", "S2", "S3", "S4", "S5"]),
+         step("S6", "orchestrator.getAuditSummary", "node1", {"timeRange": {"from": "2026-08-28T23:55:00Z", "to": "2026-08-28T23:59:59Z"}}, ["S1", "S2", "S3", "S4", "S5"]),
      ], policy="partial-success")),
 ]
 
 
+REQUESTED_AT = "2026-08-28T12:00:00Z"
+PRINT_SYSTEM_PROMPT_SCRIPT = Path(__file__).parent.parent.parent / "tools" / "print-system-prompt.ts"
+
+
+def build_system_prompt(ctx):
+    """Shells out to tools/print-system-prompt.ts so this eval set's prompt is
+    byte-for-byte the same buildDefaultSystemPrompt() production uses,
+    instead of a second, hand-maintained copy of the prompt template in
+    Python (see plan_LLM_訓練清單.md §十四 for why the old raw-JSON-context
+    format was replaced)."""
+    payload = json.dumps({
+        "resources": ctx["resources"], "nodes": ctx["nodes"],
+        "tools": ctx["tools"], "requestedAt": REQUESTED_AT,
+    })
+    result = subprocess.run(
+        ["node", "--require", "ts-node/register", str(PRINT_SYSTEM_PROMPT_SCRIPT)],
+        input=payload, capture_output=True, text=True, encoding="utf-8", check=True,
+    )
+    return result.stdout
+
+
 def main():
     rows = []
+    system_cache = {}
     for scenario_id, instruction, ctx, expected in SCENARIOS:
-        rows.append({"scenarioId": scenario_id, "instruction": instruction, "input": json.dumps(ctx), "output": json.dumps(expected)})
+        cache_key = id(ctx["tools"])
+        if cache_key not in system_cache:
+            system_cache[cache_key] = build_system_prompt(ctx)
+        rows.append({
+            "scenarioId": scenario_id, "instruction": instruction,
+            "system": system_cache[cache_key], "output": json.dumps(expected),
+            "context": json.dumps(ctx),
+        })
     OUT_PATH.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8")
     print(f"[build_c6_scenarios] wrote {len(rows)} rows to {OUT_PATH}")
 

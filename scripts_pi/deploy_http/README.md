@@ -10,6 +10,7 @@
 - `POST /deploy`：從 Claw Dashboard 推送腳本或檔案
 - `GET /health`：節點健康狀態
 - `GET /scripts`：已登錄腳本清單
+- `POST /children/connect`：驗證孫節點並將註冊資料轉送 Accounting
 - `POST /cmd`：Shell 診斷指令（白名單限制）
 - AuditTrail SQLite 稽核記錄（A3 公理）
 
@@ -127,6 +128,8 @@ Health 分頁應顯示節點為綠色 online。
 | `DATA_DIR` | `/opt/hiba/data` | 資料目錄 |
 | `AUDIT_DB` | `/opt/hiba/subweb/audit_trail.db` | SQLite 路徑 |
 | `PORT` | `3000` | 監聽 port |
+| `ACCOUNTING_URL` | `http://core.local:9090` | Accounting Server 位址 |
+| `CHILD_REGISTRATION_TOKEN` | 由 secret 管理機制注入 | 孫節點註冊 token；未設定時端點停用 |
 
 ---
 
@@ -142,6 +145,12 @@ journalctl -u hiba-subweb -f       # 即時日誌
 curl http://localhost:3000/health
 curl http://localhost:3000/scripts
 
+# 由孫節點向直屬父節點申請註冊；無 TPM 節點會進入 pending_approval
+curl -X POST http://PARENT_NODE:3000/children/connect \
+  -H "Content-Type: application/json" \
+  -H "X-Registration-Token: $CHILD_REGISTRATION_TOKEN" \
+  -d '{"nodeId":"child-01","agentUrl":"http://192.168.200.141:3000","attestationMode":"none"}'
+
 # 執行腳本（測試）
 curl -X POST http://localhost:3000/execute \
   -H "Content-Type: application/json" \
@@ -151,6 +160,8 @@ curl -X POST http://localhost:3000/execute \
 # 日誌
 tail -f /opt/hiba/logs/subweb.log
 ```
+
+`attestationMode` 可為 `tpm2`、`software`、`demo` 或 `none`。父節點會先核對孫節點的 `/health.nodeId`，再轉送其 `/scripts` 清單；Accounting 將轉送註冊保存為 `pending_approval` 且 `tpmVerified: false`。TPM 宣告不等於已驗證，後續仍須由 Dashboard/Accounting 的核准與 attestation 流程放行。
 
 ---
 
