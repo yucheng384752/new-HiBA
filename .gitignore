@@ -51,3 +51,7 @@ TODO.md
 
 # env.verifyFileIo test artifacts (overwritten on every run, not source)
 scripts_pi/**/test_io.txt
+# Local-only tooling workaround (e.g. standalone Python for sandboxed
+# execution contexts that cannot resolve the Windows Store Python alias);
+# never meant to be tracked.
+.local-tools/
