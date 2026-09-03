@@ -1,10 +1,10 @@
-import { describe, test, expect, beforeEach, jest } from '@jest/globals';
+import { describe, test, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { z } from 'zod';
 import { HiBAToolbox } from '../core/HiBAToolbox';
 import { AuditTrail } from '../audit/AuditTrail';
 import { OrchestratorRunner } from '../server/OrchestratorRunner';
 import { defineTool } from '../core/defineTool';
-import { allHibaTools, registerHibaTools } from './hiba.tools';
+import { allHibaTools, findProtectionTransaction, registerHibaTools } from './hiba.tools';
 import { registerAuditTools } from './audit.tools';
 import type { ExecutionPlan, ToolContext } from '../types/hiba.types';
 
@@ -73,6 +73,56 @@ describe('registerHibaTools', () => {
     const tools = toolbox.list();
     const domains = new Set(tools.map(t => t.name.split('.')[0]));
     expect([...domains].sort()).toEqual(['env', 'machine', 'man', 'material', 'method', 'orchestrator']);
+  });
+});
+
+// Regression coverage: material.protectFile used to trust the first
+// transaction in the block range whose `to` matched the FileProtection
+// contract. Under concurrent protectFile calls, a second call's transaction
+// could land in the same range and get indexed against the wrong file. The
+// fileHash-in-calldata check must reject that decoy.
+describe('findProtectionTransaction', () => {
+  const contract = `0x${'ab'.repeat(20)}`;
+  const fileHash = 'f'.repeat(64);
+  const decoyFileHash = 'a'.repeat(64);
+  let previousContract: string | undefined;
+
+  beforeEach(() => {
+    previousContract = process.env['FILE_PROTECTION_CONTRACT_ADDRESS'];
+    process.env['FILE_PROTECTION_CONTRACT_ADDRESS'] = contract;
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+    if (previousContract === undefined) delete process.env['FILE_PROTECTION_CONTRACT_ADDRESS'];
+    else process.env['FILE_PROTECTION_CONTRACT_ADDRESS'] = previousContract;
+  });
+
+  test('picks the transaction whose calldata carries this file hash, ignoring a same-block decoy to the same contract', async () => {
+    const decoyTx = { hash: '0xdecoy', to: contract, input: `0x1234${Buffer.from(decoyFileHash, 'ascii').toString('hex')}` };
+    const realTx = { hash: '0xreal', to: contract, input: `0x1234${Buffer.from(fileHash, 'ascii').toString('hex')}` };
+
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      const body = JSON.parse((init as RequestInit).body as string) as { method: string };
+      if (body.method !== 'eth_getBlockByNumber') throw new Error(`unexpected RPC method ${body.method}`);
+      return new Response(JSON.stringify({
+        jsonrpc: '2.0', id: 1,
+        result: { hash: '0xblock11', transactions: [decoyTx, realTx] },
+      }));
+    });
+
+    await expect(findProtectionTransaction(10, 11, fileHash)).resolves.toEqual({ txHash: '0xreal', blockHash: '0xblock11' });
+  });
+
+  test('throws when no transaction in range carries this file hash, even if one targets the contract', async () => {
+    const decoyTx = { hash: '0xdecoy', to: contract, input: `0x1234${Buffer.from(decoyFileHash, 'ascii').toString('hex')}` };
+
+    jest.spyOn(global, 'fetch').mockImplementation(async () => new Response(JSON.stringify({
+      jsonrpc: '2.0', id: 1,
+      result: { hash: '0xblock11', transactions: [decoyTx] },
+    })));
+
+    await expect(findProtectionTransaction(10, 11, fileHash)).rejects.toThrow(/no FileProtection transaction/);
   });
 });
 

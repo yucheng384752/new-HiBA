@@ -1,7 +1,11 @@
 import { z } from 'zod';
+import { createHash } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import { basename } from 'node:path';
 import { defineTool } from '../core/defineTool';
 import type { HiBAToolbox } from '../core/HiBAToolbox';
 import type { ToolContext } from '../types/hiba.types';
+import { findProtectionRecord, saveProtectionRecord } from './FileProtectionIndex';
 
 // ── Shared sub-schemas ────────────────────────────────────────────────────────
 
@@ -16,21 +20,102 @@ const notImplemented = async (): Promise<never> => {
   throw new Error('NOT_IMPLEMENTED');
 };
 
-// ── Helper: POST to Java hiba-core HTTP API ───────────────────────────────────
+// ── Helper: Java HiBA + Web3 RPC bridge ──────────────────────────────────────
 
-async function hibaFetch(ctx: ToolContext, path: string, body: unknown): Promise<unknown> {
-  const res = await fetch(`${ctx.hibaBaseUrl}${path}`, {
+type ChainRecord = { txHash: string; blockHash: string };
+type HibaFile = { success?: boolean; fileHash?: string; metadata?: { verdict?: string } };
+type HibaResponse = { success: boolean; data?: { files?: HibaFile[] } };
+
+async function hibaFileRequest(
+  ctx: ToolContext,
+  requestName: 'BlockchainFileProtect' | 'BlockchainFileIntegrity',
+  filePath: string,
+  keepFile = true,
+): Promise<{ response: HibaResponse; fileHash: string }> {
+  const bytes = await readFile(filePath);
+  const fileName = basename(filePath);
+  const form = new FormData();
+  form.append('serviceName', requestName);
+  form.append('requestName', requestName);
+  form.append('description', `HiBA-AB trace ${ctx.traceId}`);
+  form.append('keepFile', String(keepFile));
+  form.append('file', new Blob([bytes]), fileName);
+
+  const res = await fetch(`${ctx.hibaBaseUrl.replace(/\/$/, '')}/`, {
     method: 'POST',
     headers: {
-      'Content-Type': 'application/json',
       'X-Trace-Id': ctx.traceId,
       'X-Agent-Id': ctx.agentId,
       'X-Depth':    String(ctx.depth),
     },
-    body: JSON.stringify(body),
+    body: form,
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status} from ${path}`);
-  return res.json();
+  if (!res.ok) throw new Error(`Java HiBA HTTP ${res.status}`);
+  const response = await res.json() as HibaResponse;
+  const fileHash = createHash('sha256')
+    .update(bytes)
+    .update(fileName)
+    .update(String(bytes.length))
+    .update('SHA-256')
+    .update('8192')
+    .digest('hex');
+  return { response, fileHash };
+}
+
+async function rpc<T>(method: string, params: unknown[]): Promise<T> {
+  const url = process.env['WEB3_RPC_URL'] ?? 'http://127.0.0.1:8545';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }),
+  });
+  if (!res.ok) throw new Error(`Web3 RPC HTTP ${res.status}`);
+  const body = await res.json() as { result?: T; error?: { message?: string } };
+  if (body.error !== undefined || body.result === undefined) {
+    throw new Error(`Web3 RPC ${method} failed: ${body.error?.message ?? 'missing result'}`);
+  }
+  return body.result;
+}
+
+async function latestBlockNumber(): Promise<number> {
+  return Number.parseInt(await rpc<string>('eth_blockNumber', []), 16);
+}
+
+async function chainContext(): Promise<{ chainId: string; contractAddress: string }> {
+  const chainId = await rpc<string>('eth_chainId', []);
+  const contractAddress = process.env['FILE_PROTECTION_CONTRACT_ADDRESS'];
+  if (!/^0x[0-9a-f]{40}$/i.test(contractAddress ?? '')) {
+    throw new Error('FILE_PROTECTION_CONTRACT_ADDRESS is required and must be a 20-byte address');
+  }
+  return { chainId, contractAddress: contractAddress! };
+}
+
+// Solidity ABI-encodes a `string` argument as a 32-byte length word followed by
+// its UTF-8 bytes. fileHash is always a 64-char hex digest, i.e. exactly 64
+// bytes / 2 EVM words, so it lands in calldata with no padding — its hex form
+// is a reliable, dependency-free substring check against tx.input. This is
+// what tells apart this call's on-chain transaction from any other concurrent
+// call hitting the same contract address in the same block range.
+function fileHashCalldataMarker(fileHash: string): string {
+  return Buffer.from(fileHash, 'ascii').toString('hex');
+}
+
+export async function findProtectionTransaction(fromBlock: number, toBlock: number, fileHash: string): Promise<ChainRecord> {
+  const contract = process.env['FILE_PROTECTION_CONTRACT_ADDRESS']?.toLowerCase();
+  if (contract === undefined) throw new Error('FILE_PROTECTION_CONTRACT_ADDRESS is required');
+  const marker = fileHashCalldataMarker(fileHash);
+
+  for (let blockNumber = fromBlock + 1; blockNumber <= toBlock; blockNumber += 1) {
+    const block = await rpc<{ hash: string; transactions: Array<{ hash: string; to: string | null; input: string }> }>(
+      'eth_getBlockByNumber',
+      [`0x${blockNumber.toString(16)}`, true],
+    );
+    const transaction = block.transactions.find(item =>
+      item.to?.toLowerCase() === contract && item.input.toLowerCase().includes(marker),
+    );
+    if (transaction !== undefined) return { txHash: transaction.hash, blockHash: block.hash };
+  }
+  throw new Error('Java HiBA succeeded but no FileProtection transaction carrying this file hash was found');
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -54,8 +139,15 @@ const materialProtectFile = defineTool({
   timeout: 30_000,
   retryPolicy: { maxAttempts: 3, initialDelayMs: 500, backoffMultiplier: 2, retryOn: ['TOOL_TIMEOUT'] },
   handler: async (input, ctx) => {
-    const data = await hibaFetch(ctx, '/api/blockchain/protect', { filePath: input.filePath }) as { txHash: string };
-    return { success: true, txHash: data.txHash };
+    const before = await latestBlockNumber();
+    const { response, fileHash } = await hibaFileRequest(ctx, 'BlockchainFileProtect', input.filePath, input.keepFile);
+    const file = response.data?.files?.[0];
+    if (!response.success || !file?.success || file.fileHash !== fileHash) {
+      throw new Error('Java HiBA did not protect the file');
+    }
+    const chain = await findProtectionTransaction(before, await latestBlockNumber(), fileHash);
+    saveProtectionRecord({ fileHash, ...await chainContext(), ...chain });
+    return { success: true, txHash: chain.txHash };
   },
 });
 
@@ -76,10 +168,16 @@ const materialVerifyFile = defineTool({
   timeout: 15_000,
   retryPolicy: { maxAttempts: 2, initialDelayMs: 500, backoffMultiplier: 2, retryOn: ['TOOL_TIMEOUT'] },
   handler: async (input, ctx) => {
-    const data = await hibaFetch(ctx, '/api/blockchain/verify', { filePath: input.filePath }) as {
-      valid: boolean; txHash: string; blockHash: string;
+    const { response, fileHash } = await hibaFileRequest(ctx, 'BlockchainFileIntegrity', input.filePath);
+    const file = response.data?.files?.[0];
+    const context = await chainContext();
+    const chain = findProtectionRecord(fileHash, context.chainId, context.contractAddress);
+    if (chain === null) throw new Error('No protection transaction indexed for this file, chain, and contract');
+    return {
+      isValid: response.success && file?.success === true && file.metadata?.verdict === 'VERIFICATION_SUCCESSFUL',
+      txHash: chain.txHash,
+      blockHash: chain.blockHash,
     };
-    return { isValid: data.valid, txHash: data.txHash, blockHash: data.blockHash };
   },
 });
 
