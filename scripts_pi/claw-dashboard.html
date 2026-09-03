@@ -721,7 +721,12 @@
             <strong>Blockchain File Verification</strong>
             <span class="badge status" style="color:var(--green)">REAL MATERIAL TOOL</span>
           </div>
-          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">經由 <code>/api/execute</code> 呼叫 material.protectFile / material.verifyFile；不使用 <code>mode: mock</code> 端點。</p>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">本機經由 <code>/api/execute</code>；遠端節點經由 <code>/api/run</code> 派送 material.protectFile / material.verifyFile。</p>
+          <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:12px">執行節點
+            <select id="blockchainNode" class="wf-select" style="display:block;width:100%;margin-top:5px" onchange="resetBlockchainEvidence()">
+              <option value="local">local（Planning Server）</option>
+            </select>
+          </label>
           <div class="attach-bar" id="attachBar_blockchainEvidence">
             <button class="attach-btn" onclick="triggerAttachPicker('blockchainEvidence')">📎 選擇驗證檔案</button>
             <span style="font-size:11px;color:var(--muted)">.json,.txt,.csv,.tsv,.log,.md · 上限 512KB</span>
@@ -1311,6 +1316,7 @@ function switchTab(tab) {
   if (tab === 'deploy') renderDeploy();
   if (tab === 'curl') renderCurl();
   if (tab === 'workflow') renderWorkflow();
+  if (tab === 'blockchain') renderBlockchainNodeOptions();
   if (tab === 'linetopo') renderLineTopology();
   if (activeNodeId && tab === 'stream') renderStream();
 }
@@ -2303,6 +2309,52 @@ async function executeMaterial(toolName, input) {
   return result.output;
 }
 
+function blockchainTargetNode() {
+  return document.getElementById('blockchainNode')?.value || 'local';
+}
+
+function renderBlockchainNodeOptions() {
+  const select = document.getElementById('blockchainNode');
+  if (!select) return;
+  const selected = select.value || 'local';
+  const options = accountingCapabilities
+    .filter(node => node.status === 'online'
+      && ['material.readAttachment', 'material.protectFile', 'material.verifyFile']
+        .every(toolName => node.resources.some(resource => resource.name === toolName)))
+    .map(node => `<option value="${escapeHtml(node.nodeId)}">${escapeHtml(nodeAliases.get(node.nodeId) || node.nodeId)}</option>`)
+    .join('');
+  select.innerHTML = `<option value="local">local（Planning Server）</option>${options}`;
+  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+}
+
+async function executeRemoteMaterial(toolName, input, content) {
+  const target = blockchainTargetNode();
+  const attachment = getAttachmentData('blockchainEvidence');
+  if (!attachment) throw new Error('請先選擇檔案');
+  const traceId = genTraceId();
+  const plan = {
+    protocolVersion: '1.0',
+    steps: [
+      { stepId: 'S1', toolName: 'material.readAttachment', nodeId: target, version: '1.0.0',
+        input: { _attachment: { name: attachment.name, content }, maxRows: 20 }, dependsOn: [] },
+      { stepId: 'S2', toolName, nodeId: target, version: '1.0.0',
+        input: { ...input, filePath: '$steps.S1.output.filePath' }, dependsOn: ['S1'] },
+    ],
+    supervisorPolicy: 'fail-fast',
+  };
+  const res = await safeFetch(`${workflowPlanningUrl.replace(/\/+$/, '')}/api/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Trace-Id': traceId, 'X-Agent-Id': AGENT_ID },
+    body: JSON.stringify({ plan }),
+    timeout: 120_000,
+  });
+  const run = await res.json();
+  const step = run.steps?.find(item => item.stepId === 'S2');
+  if (!res.ok || !step?.result?.success) throw new Error(step?.result?.error || run.error || `HTTP ${res.status}`);
+  if (step.dispatched !== 'remote' || step.nodeId !== target) throw new Error(`Remote dispatch mismatch: expected ${target}`);
+  return step.result.output;
+}
+
 async function landBlockchainAttachment(content) {
   const attachment = getAttachmentData('blockchainEvidence');
   if (!attachment) throw new Error('請先選擇檔案');
@@ -2328,9 +2380,13 @@ async function protectBlockchainFile() {
   try {
     const attachment = getAttachmentData('blockchainEvidence');
     if (!attachment) throw new Error('請先選擇檔案');
-    const landed = await landBlockchainAttachment(attachment.content);
-    blockchainFilePath = landed.filePath;
-    blockchainProtection = await executeMaterial('material.protectFile', { filePath: blockchainFilePath, keepFile: true });
+    if (blockchainTargetNode() === 'local') {
+      const landed = await landBlockchainAttachment(attachment.content);
+      blockchainFilePath = landed.filePath;
+      blockchainProtection = await executeMaterial('material.protectFile', { filePath: blockchainFilePath, keepFile: true });
+    } else {
+      blockchainProtection = await executeRemoteMaterial('material.protectFile', { keepFile: true }, attachment.content);
+    }
     renderBlockchainEvidence('Protect 成功', blockchainProtection);
   } catch (error) {
     toast(`Protect 失敗：${error.message}`, 'var(--red)');
@@ -2342,16 +2398,19 @@ async function verifyBlockchainFile(tamper) {
     const attachment = getAttachmentData('blockchainEvidence');
     if (!attachment) throw new Error('請先選擇檔案');
     if (!blockchainProtection) throw new Error('請先完成 Protect');
-    let filePath = blockchainFilePath;
+    let content = attachment.content;
     if (tamper) {
       if (!attachment.content.length) throw new Error('空檔案無法執行單字元篡改測試');
       const first = attachment.content[0] === 'X' ? 'Y' : 'X';
-      filePath = (await landBlockchainAttachment(first + attachment.content.slice(1))).filePath;
+      content = first + attachment.content.slice(1);
     }
-    const output = await executeMaterial('material.verifyFile', {
-      filePath,
-      protectionId: blockchainProtection.protectionId,
-    });
+    let output;
+    if (blockchainTargetNode() === 'local') {
+      const filePath = tamper ? (await landBlockchainAttachment(content)).filePath : blockchainFilePath;
+      output = await executeMaterial('material.verifyFile', { filePath, protectionId: blockchainProtection.protectionId });
+    } else {
+      output = await executeRemoteMaterial('material.verifyFile', { protectionId: blockchainProtection.protectionId }, content);
+    }
     renderBlockchainEvidence(tamper ? 'Tamper Test 結果' : 'Verify 結果', output);
   } catch (error) {
     toast(`Verify 失敗：${error.message}`, 'var(--red)');
@@ -3178,6 +3237,7 @@ async function loadAccountingCapabilities() {
     });
   });
   renderNodeList();
+  renderBlockchainNodeOptions();
   return accountingCapabilities;
 }
 
