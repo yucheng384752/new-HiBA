@@ -96,6 +96,29 @@ const ATTACHMENT_MAX_BYTES = 512 * 1024;
 const ATTACHMENT_BODY_MAX_BYTES = 1024 * 1024;
 const ATTACHMENT_EXTENSIONS = new Set(['.json', '.txt', '.csv', '.tsv', '.log', '.md']);
 
+interface Attachment {
+  name: string;
+  content: string;
+}
+
+function parseAttachment(value: unknown): Attachment {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('"_attachment" must contain string "name" and "content" fields');
+  }
+  const { name, content } = value as { name?: unknown; content?: unknown };
+  if (typeof name !== 'string' || typeof content !== 'string') {
+    throw new Error('"_attachment" must contain string "name" and "content" fields');
+  }
+  const extension = extname(name).toLowerCase();
+  if (!ATTACHMENT_EXTENSIONS.has(extension)) {
+    throw new Error(`Attachment type must be one of: ${[...ATTACHMENT_EXTENSIONS].join(', ')}`);
+  }
+  if (Buffer.byteLength(content, 'utf8') > ATTACHMENT_MAX_BYTES) {
+    throw new Error('Attachment exceeds 524288 bytes');
+  }
+  return { name, content };
+}
+
 async function landAttachment(rawInput: unknown): Promise<Record<string, unknown>> {
   if (typeof rawInput !== 'object' || rawInput === null || Array.isArray(rawInput)) return {};
   const input = { ...rawInput } as Record<string, unknown>;
@@ -104,19 +127,9 @@ async function landAttachment(rawInput: unknown): Promise<Record<string, unknown
   const attachment = input['_attachment'];
   delete input['_attachment'];
   if (attachment === undefined) return input;
-  if (typeof attachment !== 'object' || attachment === null || Array.isArray(attachment)) {
-    throw new Error('"_attachment" must contain string "name" and "content" fields');
-  }
-  const { name, content } = attachment as { name?: unknown; content?: unknown };
-  if (typeof name !== 'string' || typeof content !== 'string') {
-    throw new Error('"_attachment" must contain string "name" and "content" fields');
-  }
+  const { name, content } = parseAttachment(attachment);
   const extension = extname(name).toLowerCase();
-  if (!ATTACHMENT_EXTENSIONS.has(extension)) {
-    throw new Error(`Attachment type must be one of: ${[...ATTACHMENT_EXTENSIONS].join(', ')}`);
-  }
   const data = Buffer.from(content, 'utf8');
-  if (data.byteLength > ATTACHMENT_MAX_BYTES) throw new Error('Attachment exceeds 524288 bytes');
 
   const root = process.env['HIBA_ATTACHMENT_DIR'] ?? join(tmpdir(), 'hiba-agent-attachments');
   const ttlMs = Number(process.env['HIBA_ATTACHMENT_TTL_MS'] ?? 3_600_000);
@@ -132,6 +145,43 @@ async function landAttachment(rawInput: unknown): Promise<Record<string, unknown
   await mkdir(dir);
   await writeFile(path, data, { flag: 'wx' });
   return { ...input, _filePath: path, _fileName: basename(name) };
+}
+
+const ATTACHMENT_CONSUMERS = new Set(['material.protectFile', 'material.verifyFile']);
+
+function enrichPlanWithAttachment(plan: ExecutionPlan, attachment: Attachment): {
+  plan: ExecutionPlan;
+  attachmentUnused?: true;
+} {
+  const consumers = plan.steps.filter(step => ATTACHMENT_CONSUMERS.has(step.toolName));
+  if (consumers.length === 0) return { plan, attachmentUnused: true };
+
+  const nodeIds = [...new Set(consumers.map(step => step.nodeId))];
+  if (nodeIds.length > 1) {
+    throw new Error(`Attachment-backed Protect/Verify steps must use one nodeId; received: ${nodeIds.join(', ')}`);
+  }
+  if (plan.steps.some(step => step.stepId === 'S0')) {
+    throw new Error('Step ID S0 is reserved for attachment handling');
+  }
+
+  const { validationIssues: _validationIssues, missingInputs: _missingInputs, ...basePlan } = plan;
+  return {
+    plan: {
+      ...basePlan,
+      steps: [{
+        stepId: 'S0',
+        toolName: 'material.readAttachment',
+        nodeId: nodeIds[0]!,
+        version: '1.0.0',
+        input: { _attachment: attachment, maxRows: 20 },
+        dependsOn: [],
+      }, ...plan.steps.map(step => ATTACHMENT_CONSUMERS.has(step.toolName) ? {
+        ...step,
+        input: { ...step.input, filePath: '$steps.S0.output.filePath' },
+        dependsOn: [...new Set([...step.dependsOn, 'S0'])],
+      } : step)],
+    },
+  };
 }
 
 // ── Intent Parsing ────────────────────────────────────────────────────────────
@@ -504,7 +554,11 @@ export class AgentServer {
       }
 
       if (method === 'POST' && urlPath === '/api/plan') {
-        const body = (await readBody(req)) as { task?: string; ctx?: Partial<ToolContext> };
+        const body = (await readBody(req, ATTACHMENT_BODY_MAX_BYTES)) as {
+          task?: string;
+          ctx?: Partial<ToolContext>;
+          _attachment?: unknown;
+        };
         if (!body.task?.trim()) {
           jsonError(res, 400, 'REQUEST_INVALID', '"task" is required and must be non-empty');
           return;
@@ -517,7 +571,33 @@ export class AgentServer {
           permissions: this.options.defaultCtx?.permissions ?? [],
           ...body.ctx,
         };
-        const plan = await this.planning.plan(body.task, ctx);
+        let plan = await this.planning.plan(body.task, ctx);
+        let attachmentUnused: true | undefined;
+        if (body._attachment !== undefined) {
+          try {
+            const enriched = enrichPlanWithAttachment(plan, parseAttachment(body._attachment));
+            plan = enriched.plan;
+            attachmentUnused = enriched.attachmentUnused;
+          } catch (error) {
+            jsonError(res, 422, 'REQUEST_INVALID', error instanceof Error ? error.message : String(error));
+            return;
+          }
+          if (!attachmentUnused && this.options.toolbox) {
+            const validation = validatePlan(plan, {
+              tools: this.options.toolbox.list(),
+              nodes: await this.planning.getNodes(),
+            });
+            if (!validation.valid) {
+              json(res, 422, {
+                ...createToolFailure('REQUEST_INVALID', 'Attachment-enriched plan validation failed'),
+                validationIssues: validation.issues,
+                missingInputs: validation.missingInputs,
+              });
+              return;
+            }
+          }
+        }
+        const responsePlan = attachmentUnused ? { ...plan, attachmentUnused } : plan;
         if (this.options.workflowStore && !plan.error) {
           const workflow = this.options.workflowStore.create(body.task.trim(), plan, ctx);
           const event = await this.options.auditTrail?.recordEvent({
@@ -529,14 +609,14 @@ export class AgentServer {
             metadata: { stepCount: workflow.plan.steps.length },
           });
           json(res, 200, {
-            ...plan,
+            ...responsePlan,
             workflowId: workflow.workflowId,
             status: workflow.status,
             createdAt: workflow.createdAt,
             ...(event ? { eventHash: event.eventHash } : {}),
           });
         } else {
-          json(res, 200, plan);
+          json(res, 200, responsePlan);
         }
         return;
       }

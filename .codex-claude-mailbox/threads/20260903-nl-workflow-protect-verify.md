@@ -1,13 +1,13 @@
 ---
 id: "20260903-nl-workflow-protect-verify"
 title: "自然語言觸發 Protect/Verify Workflow"
-status: "draft"
-owner: "codex"
+status: "completed"
+owner: "claude"
 reviewer: "claude"
 priority: "medium"
 created_by: "claude"
 created_at: "2026-09-03T20:30:00+08:00"
-updated_at: "2026-09-03T20:50:00+08:00"
+updated_at: "2026-09-03T21:15:00+08:00"
 role_priority:
   implementation: "codex"
   review: "claude"
@@ -20,6 +20,8 @@ artifacts:
     type: "file"
   - path: "scripts_pi/claw-dashboard.html"
     type: "file"
+  - path: "hiba-core/packages/hiba-agent/src/server/AgentServer.test.ts"
+    type: "test"
 ---
 
 # Goal
@@ -126,8 +128,25 @@ Protect/Verify 分散到不同 node，應回傳可讀的規劃錯誤要求使用
   生成品質驗證；這兩項明確 **BLOCKED**。本次只完成程式碼調查與設計提案，
   沒有修改任何 implementation code、沒有進行假裝的 live 測試。
 
-Thread status 保持 `draft`，語意為「proposal written, awaiting review」；待
-Claude／使用者核准設計後才進入實作。
+## Implementation（Codex，2026-09-03）
+
+Claude／使用者核准後已完成實作，未修改 `NLPlanningService.ts` 或
+`HttpLLMClient.ts`。`AgentServer.ts` 的 `POST /api/plan` 現在接受既有
+`_attachment`，在 `planning.plan()` 回傳後、workflow create 前執行 enrichment：
+
+- 只要附件存在，就無條件覆蓋所有 `material.protectFile`／
+  `material.verifyFile` 的 `filePath`；
+- 同一 node 的所有 consumer 共用唯一 `S0: material.readAttachment`，並共同
+  引用 `$steps.S0.output.filePath`、依賴 `S0`；
+- consumer 跨 node 時回 HTTP 422／`REQUEST_INVALID` 與可讀錯誤；
+- 沒有 consumer 時不改 plan，response 額外帶 `attachmentUnused: true`；
+- enrichment 後沿用 `validatePlan()` 再驗證，並清除 enrichment 前可能留下的
+  stale `validationIssues`／`missingInputs`。
+
+附件格式與 512 KiB 限制抽成既有落地流程與 plan request 共用的驗證函式；
+Dashboard Workflow request 直接沿用已選的 `blockchainEvidence` attachment 傳入
+`_attachment`，並在 `attachmentUnused` 時顯示非阻斷提示。沒有新增 upload API、
+artifact ID 或 prompt context。
 
 # Claude Notes
 
@@ -172,14 +191,87 @@ deterministic enrichment 完全不碰 LLM 看到的東西，風險特性跟這�
 
 # Review Findings
 
-（尚未審查——本 thread 還沒有 Codex 實作可供審查）
+實作完全符合核准的三個實作細節，讀完 diff 逐項核對：
+
+- **無條件覆蓋 filePath**：`enrichPlanWithAttachment()` 對每個
+  `ATTACHMENT_CONSUMERS`（protectFile/verifyFile）step 一律
+  `input: { ...step.input, filePath: '$steps.S0.output.filePath' }`，
+  沒有嘗試判斷原本的值合不合理，符合要求。
+- **未使用不算錯誤，跨節點才拒絕**：`consumers.length === 0` 直接回傳
+  `attachmentUnused: true` 放行；`nodeIds.length > 1` 才 throw，被
+  route handler 接住轉成 422。兩條路徑邏輯正確分開。
+- **同節點多 consumer 共用一個 `S0`**：只建立一次 `S0`，所有 consumer
+  都 `dependsOn: [...new Set([...step.dependsOn, 'S0'])]`，同一個
+  `$steps.S0.output.filePath` 參照。
+
+意外的加分項（沒要求但做了）：`plan.steps.some(step => step.stepId ===
+'S0')` 防呆——如果 LLM 自己剛好也用了 `S0` 這個 step ID，會明確拒絕而不
+是靜默覆蓋掉，避免 ID 碰撞。`parseAttachment()` 抽成共用函式，
+`landAttachment()`（`/api/execute` 路徑）跟新的 enrichment 路徑（
+`/api/plan`）共用同一套格式/大小驗證，沒有重複一份規則。
+
+`/api/tools` 測試改動查過不是弱化斷言：舊測試寫死 `tools.length===1`
+並直接索引 `tools[0]`，因為 fixture 現在合理地多註冊了 2 個工具
+（`readAttachment`/`verifyFile`，enrichment 測試需要）才壞掉；改成
+`tools.find(t => t.name === 'material.protectFile')` 後斷言的屬性完全
+沒變少，是合理的 fixture 適應，不是把測試改鬆。
+
+四個新測試（`attachment-single`/`attachment-multi`/`attachment-unused`/
+`attachment-shared`）精確對應審查時提出的三個細節，沒有遺漏。
+
+獨立重新驗證（不只信任 Codex 自報數字）：
+
+- `hiba-core/packages/hiba-agent`：`npm run typecheck` 乾淨；`npm test`：
+  17 suites passed（+1 live E2E skipped）、**200 tests passed**、0
+  failed——跟 Codex 回報數字一致。
+- `hiba-core` root：`npm run typecheck` 乾淨；`npm test`：17/17 passed。
+- Dashboard 改動只有 6 行，重用既有的 `blockchainEvidence` 附件元件，
+  沒有另開一個新的附件選擇器，符合最小改動原則。
+
+未驗證（如實記錄）：真實 LLM 的 `plan() → approve → run → summary`
+端到端流程，因為 Accounting（9090）與 Ollama（11434）目前都沒有在跑，
+無法驗證真實模型產生的 plan 是否真的會被正確 enrichment（例如模型有沒有
+可能把 Protect/Verify 拆到不同 nodeId，這在單元測試裡是用 mock LLM 模擬
+出來的，還沒有用真實模型的行為驗證過）。這個缺口是環境限制，不是
+Codex 或這次審查的疏漏，等服務上線後應該補一次 live 驗證。
 
 # Test Plan
 
-（等 Open Question 的設計方向定案後，Codex 應該在 Codex Notes 補上具體
-測試計畫，不要照抄前兩個 thread 的 Test Plan——這個 thread 的核心風險在
-「附件如何進到 LLM 產生的 plan 裡」，測試要優先覆蓋這一段，而非只是重複
-前兩輪已經測過的 remote dispatch 機制本身。）
+1. `_attachment` + 單一 node Protect：注入唯一 `S0`，保留附件 payload，並
+   無條件把 LLM 猜測的 `filePath` 改為 `$steps.S0.output.filePath`。
+2. `_attachment` + Protect/Verify 分散到不同 nodeId：HTTP 422 且回傳清楚的
+   `REQUEST_INVALID` 錯誤，不建立 workflow。
+3. `_attachment` + 無 Protect/Verify：steps 原樣通過、不注入 readAttachment，
+   response 帶非阻斷 `attachmentUnused: true`。
+4. `_attachment` + 同 node 的 Protect 與 Verify：只注入一個 readAttachment，
+   兩個 consumer 都引用同一個 output 並依賴 `S0`，原本的相依關係仍保留。
+5. 回歸：AgentServer focused suite、hiba-agent typecheck/full Jest、hiba-core root
+   typecheck/full tests、Dashboard inline JavaScript parse、`git diff --check`。
+6. Accounting 與 Ollama 上線時執行真實自然語言 plan → approve → run → summary；
+   若服務未上線則明確標為 BLOCKED。
+
+# Test Results
+
+- PASS — focused `AgentServer.test.ts`：1 suite、38 tests passed、0 failed；四個
+  attachment enrichment 案例全部通過。
+- 第一次 focused run 的四個新案例已通過，但整體 suite 曾因 fixture 新增
+  readAttachment/verifyFile 後，舊 `/api/tools` 測試仍硬編碼「只有一個 tool」而
+  1 test failed；改為依 tool name 檢查 Protect metadata 後重跑即 38/38 PASS。
+- PASS — `hiba-core/packages/hiba-agent`: `npm.cmd run typecheck`，`tsc --noEmit`
+  exit 0。
+- PASS — `hiba-core/packages/hiba-agent`: `npm.cmd test`，17 suites passed、1 live
+  suite skipped；200 tests passed、1 skipped、0 failed。
+- PASS — `hiba-core`: `npm.cmd run typecheck`，`tsc --noEmit` exit 0。
+- PASS — `hiba-core`: `npm.cmd test`，17 tests passed、0 failed。
+- PASS — Dashboard inline JavaScript：Node `new Function(...)` 成功解析 1 script。
+- PASS — `git diff --check`；只有既有 LF→CRLF working-copy warnings，沒有
+  whitespace error。
+- Live status 重查：`curl --max-time 5 http://127.0.0.1:9090/api/nodes` 與
+  `http://127.0.0.1:11434/api/tags` 都連線失敗、`HTTP_STATUS:000`；Accounting
+  與 Ollama/LLM 仍為 **down**。
+- **BLOCKED** — 真實 LLM 的 plan → approve → run → summary end-to-end 驗證；
+  原因是 Accounting 9090 與 Ollama 11434 均未上線。所有不依賴 live LLM 的
+  implementation、mock planning 測試及完整回歸均已完成，未把此項默認為 PASS。
 
 # Decisions
 
@@ -188,13 +280,37 @@ deterministic enrichment 完全不碰 LLM 看到的東西，風險特性跟這�
   概念。
 - Accepted（承接自更早的 thread）：`NLPlanningService.summarize()` 已經
   做過輸入驗證/截斷硬化，本 thread 直接沿用，不重做。
+- Accepted（Claude／使用者核准）：attachment enrichment 固定放在
+  `AgentServer.ts` 的 `/api/plan`，位於 `planning.plan()` 後、workflow create 前；
+  不修改 planner prompt assembly。
+- Accepted：request 有 `_attachment` 時，無條件覆蓋每個 Protect/Verify 的
+  `filePath`，不信任 LLM 猜測路徑。
+- Accepted：沒有 Protect/Verify consumer 不算錯誤，以
+  `attachmentUnused: true` 非阻斷提示；只有跨 node consumers 才拒絕。
+- Accepted：同 node 多 consumer 共用唯一 `S0: material.readAttachment`。
+- Deferred（環境）：Accounting/Ollama 未上線，live end-to-end planning 驗證待
+  服務恢復後執行。
 
 # Session Summary
 
-本 thread 尚未開始實作。已確認 Accounting/LLM 目前都未上線，且查過
-`AgentServer.ts`/`NLPlanningService.ts` 確認「已上傳的附件如何讓 NL
-plan() 知道並正確引用」目前完全沒有設計——這是本 thread 唯一但關鍵的
-開放問題，Codex 接手後第一步應該先investigate 並提案，不要直接實作。
+Codex 已依核准設計完成 deterministic post-plan attachment enrichment。
+`/api/plan` 可接收既有 `_attachment`；單 node consumer 共用唯一 `S0`，所有
+Protect/Verify 路徑均被確定性覆蓋，跨 node 明確拒絕，未使用附件則原 plan
+通過並回 `attachmentUnused`。Dashboard 已接上既有附件資料，planner prompt
+程式碼未修改。Focused、agent/root typecheck 與 full suites、Dashboard syntax、
+diff check 全部通過；Accounting/Ollama 仍離線，因此 live LLM end-to-end 明確
+BLOCKED。
+
+Claude 最終審查：讀過完整 diff，逐項核對三個核准細節全數正確實作，額外
+發現一個沒要求但做了的防呆（S0 step ID 碰撞檢查）；確認 `/api/tools`
+測試改動是合理的 fixture 適應，不是弱化斷言。獨立重跑 typecheck 與完整
+測試：200 tests passed，跟 Codex 自報一致，無回歸。真實 LLM 的 end-to-end
+驗證因 Accounting/Ollama 未上線而保持 BLOCKED，記錄為服務上線後的待辦，
+不是這次審查的疏漏。狀態設為 `completed`。
+
+至此，`20260903-dashboard-web3-verification` 開出的三項 out-of-scope 工作
+（多節點傳檔、自然語言 workflow 串接、以及原本就完成的證據面板本身）皆已
+完成並通過獨立審查。
 
 # Open Questions
 

@@ -63,11 +63,40 @@ function request(
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
 const mockLLM: LLMClient = {
-  complete: async payload => ({
-    rawJson: payload.systemPrompt ? {
+  complete: async payload => {
+    if (payload.systemPrompt) return { rawJson: {
       summary: 'CNC-01 機台目前運行中。',
       steps: [{ stepId: 'S1', summary: '查詢成功。' }],
-    } : {
+    } };
+    const plans: Record<string, unknown> = {
+      'attachment-single': {
+        steps: [{
+          stepId: 'S1', toolName: 'material.protectFile', nodeId: 'local', version: '1.0.0',
+          input: { filePath: '/llm/guessed.txt' }, dependsOn: [],
+        }],
+        supervisorPolicy: 'fail-fast',
+      },
+      'attachment-multi': {
+        steps: [
+          { stepId: 'S1', toolName: 'material.protectFile', nodeId: 'local', version: '1.0.0',
+            input: { filePath: '/guess-a.txt' }, dependsOn: [] },
+          { stepId: 'S2', toolName: 'material.verifyFile', nodeId: 'node-1', version: '1.0.0',
+            input: { filePath: '/guess-b.txt' }, dependsOn: ['S1'] },
+        ],
+        supervisorPolicy: 'fail-fast',
+      },
+      'attachment-unused': { steps: [], supervisorPolicy: 'fail-fast' },
+      'attachment-shared': {
+        steps: [
+          { stepId: 'S1', toolName: 'material.protectFile', nodeId: 'local', version: '1.0.0',
+            input: { filePath: '/guess-a.txt' }, dependsOn: [] },
+          { stepId: 'S2', toolName: 'material.verifyFile', nodeId: 'local', version: '1.0.0',
+            input: { filePath: '/guess-b.txt' }, dependsOn: ['S1'] },
+        ],
+        supervisorPolicy: 'fail-fast',
+      },
+    };
+    return { rawJson: plans[payload.task] ?? {
       steps: [{
         stepId: 'S1',
         toolName: 'material.protectFile',
@@ -77,8 +106,8 @@ const mockLLM: LLMClient = {
         dependsOn: [],
       }],
       supervisorPolicy: 'fail-fast',
-    },
-  }),
+    } };
+  },
 };
 
 const mockAccounting: AccountingClient = {
@@ -94,7 +123,11 @@ const mockAccounting: AccountingClient = {
     agentUrl: 'http://node-1',
     status: 'online',
     canInstall: false,
-    resources: [{ name: 'material.protectFile', type: 'tool', version: '1.0.0' }],
+    resources: [
+      { name: 'material.readAttachment', type: 'tool', version: '1.0.0' },
+      { name: 'material.protectFile', type: 'tool', version: '1.0.0' },
+      { name: 'material.verifyFile', type: 'tool', version: '1.0.0' },
+    ],
     registeredAt: '2026-01-01T00:00:00.000Z',
     lastSeenAt: '2026-01-01T00:00:00.000Z',
   }],
@@ -109,6 +142,21 @@ function makeToolbox() {
     auditWriter: audit,
     permissions: ['material.write', 'material.read'],
   });
+  toolbox.register(defineTool({
+    name: 'material.readAttachment',
+    version: '1.0.0',
+    tags: ['material', 'read'],
+    description: '讀取附件',
+    inputSchema: z.object({
+      _filePath: z.string().optional(),
+      _fileName: z.string().optional(),
+      maxRows: z.number().default(20),
+    }),
+    outputSchema: z.object({ success: z.boolean(), filePath: z.string() }),
+    permissions: ['material.read'],
+    timeout: 5_000,
+    handler: async input => ({ success: true, filePath: input._filePath ?? '' }),
+  }));
   toolbox.register(defineTool({
     name: 'material.protectFile',
     version: '1.0.0',
@@ -125,6 +173,17 @@ function makeToolbox() {
       success: true,
       txHash: `0x${Buffer.from(input.filePath).toString('hex').slice(0, 40)}`,
     }),
+  }));
+  toolbox.register(defineTool({
+    name: 'material.verifyFile',
+    version: '1.0.0',
+    tags: ['material', 'read'],
+    description: '驗證檔案',
+    inputSchema: z.object({ filePath: z.string() }),
+    outputSchema: z.object({ success: z.boolean(), isValid: z.boolean() }),
+    permissions: ['material.read'],
+    timeout: 5_000,
+    handler: async () => ({ success: true, isValid: true }),
   }));
   return { toolbox, audit };
 }
@@ -261,13 +320,12 @@ test('GET /api/tools returns registered tool metadata', async () => {
     permissions: string[]; inputSchema: Record<string, unknown>; outputSchema: Record<string, unknown>;
   }>;
   expect(Array.isArray(tools)).toBe(true);
-  expect(tools.length).toBe(1);
-  expect(tools[0]?.name).toBe('material.protectFile');
-  expect(tools[0]?.protocolVersion).toBe('1.0');
-  expect(tools[0]?.inputSchema).toEqual(expect.objectContaining({ type: 'object', required: ['filePath'] }));
-  expect(tools[0]?.outputSchema).toEqual(expect.objectContaining({ type: 'object' }));
-  expect(tools[0]?.tags).toContain('material');
-  expect(tools[0]?.permissions).toContain('material.write');
+  const protect = tools.find(tool => tool.name === 'material.protectFile');
+  expect(protect?.protocolVersion).toBe('1.0');
+  expect(protect?.inputSchema).toEqual(expect.objectContaining({ type: 'object', required: ['filePath'] }));
+  expect(protect?.outputSchema).toEqual(expect.objectContaining({ type: 'object' }));
+  expect(protect?.tags).toContain('material');
+  expect(protect?.permissions).toContain('material.write');
 });
 
 test('GET /api/tools without toolbox returns 503', async () => {
@@ -349,6 +407,59 @@ test('POST /api/plan without task returns 400', async () => {
     errorCode: 'REQUEST_INVALID',
     retryable: false,
   }));
+});
+
+type PlanResponseStep = {
+  stepId: string;
+  toolName: string;
+  nodeId: string;
+  input: Record<string, unknown>;
+  dependsOn: string[];
+};
+
+const attachment = { name: 'proof.txt', content: 'selected proof' };
+
+test('POST /api/plan enriches single-node Protect and overwrites its filePath', async () => {
+  const res = await request(port, 'POST', '/api/plan', { task: 'attachment-single', _attachment: attachment });
+  expect(res.status).toBe(200);
+  const steps = (res.body as { steps: PlanResponseStep[] }).steps;
+  expect(steps).toEqual([
+    expect.objectContaining({
+      stepId: 'S0', toolName: 'material.readAttachment', nodeId: 'local', dependsOn: [],
+      input: { _attachment: attachment, maxRows: 20 },
+    }),
+    expect.objectContaining({
+      stepId: 'S1', nodeId: 'local', dependsOn: ['S0'],
+      input: expect.objectContaining({ filePath: '$steps.S0.output.filePath' }),
+    }),
+  ]);
+});
+
+test('POST /api/plan rejects attachment-backed Protect/Verify split across nodes', async () => {
+  const res = await request(port, 'POST', '/api/plan', { task: 'attachment-multi', _attachment: attachment });
+  expect(res.status).toBe(422);
+  expect(res.body).toEqual(expect.objectContaining({
+    success: false,
+    errorCode: 'REQUEST_INVALID',
+    error: expect.stringContaining('must use one nodeId'),
+  }));
+});
+
+test('POST /api/plan leaves a non-consuming plan unchanged and marks the attachment unused', async () => {
+  const res = await request(port, 'POST', '/api/plan', { task: 'attachment-unused', _attachment: attachment });
+  expect(res.status).toBe(200);
+  expect(res.body).toEqual(expect.objectContaining({ steps: [], attachmentUnused: true }));
+});
+
+test('POST /api/plan shares one injected readAttachment across same-node consumers', async () => {
+  const res = await request(port, 'POST', '/api/plan', { task: 'attachment-shared', _attachment: attachment });
+  expect(res.status).toBe(200);
+  const steps = (res.body as { steps: PlanResponseStep[] }).steps;
+  expect(steps.filter(step => step.toolName === 'material.readAttachment')).toHaveLength(1);
+  for (const step of steps.filter(step => ['material.protectFile', 'material.verifyFile'].includes(step.toolName))) {
+    expect(step.input.filePath).toBe('$steps.S0.output.filePath');
+    expect(step.dependsOn).toContain('S0');
+  }
 });
 
 test('POST /api/summarize returns validated natural-language result', async () => {

@@ -2442,6 +2442,7 @@ async function generatePlan() {
   const injectCtx = document.getElementById('injectCtxToggle')?.checked !== false;
   const ctxBlock  = injectCtx ? buildPlanContext() : '';
   const task      = ctxBlock ? `${ctxBlock}\n\n使用者任務：${rawTask}` : rawTask;
+  const attachment = getAttachmentData('blockchainEvidence');
 
   const badge = document.getElementById('ctxBadge');
   if (badge) {
@@ -2462,7 +2463,7 @@ async function generatePlan() {
     const res = await safeFetch(planUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task }),
+      body: JSON.stringify({ task, ...(attachment ? { _attachment: attachment } : {}) }),
       timeout: 120_000,
     });
     if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0,120)}`); }
@@ -2470,7 +2471,8 @@ async function generatePlan() {
     activeWorkflowId = workflowPlan.workflowId || null;
     if (activeWorkflowId) localStorage.setItem('wf_active_id', activeWorkflowId);
     renderPlan();
-    toast('Plan generated', 'var(--green)');
+    toast(workflowPlan.attachmentUnused ? 'Plan generated（附件未使用）' : 'Plan generated',
+      workflowPlan.attachmentUnused ? 'var(--amber)' : 'var(--green)');
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     workflowPlan = {
