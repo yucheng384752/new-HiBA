@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, test } from '@jest/globals';
-import { findProtectionRecord, saveProtectionRecord } from './FileProtectionIndex';
+import { findProtectionRecord, findProtectionRecordById, saveProtectionRecord } from './FileProtectionIndex';
 
 describe('FileProtectionIndex', () => {
   test('persists a transaction across separate database connections', async () => {
@@ -10,6 +10,7 @@ describe('FileProtectionIndex', () => {
     const previousPath = process.env['FILE_PROTECTION_INDEX_PATH'];
     process.env['FILE_PROTECTION_INDEX_PATH'] = join(dir, 'index.sqlite');
     const record = {
+      protectionId: '123e4567-e89b-42d3-a456-426614174000',
       fileHash: 'a'.repeat(64),
       chainId: '0x7a69',
       contractAddress: `0x${'b'.repeat(40)}`,
@@ -24,6 +25,13 @@ describe('FileProtectionIndex', () => {
         blockHash: record.blockHash,
       });
       expect(findProtectionRecord(record.fileHash, '0x1', record.contractAddress)).toBeNull();
+      expect(findProtectionRecord('e'.repeat(64), record.chainId, record.contractAddress)).toBeNull();
+      expect(findProtectionRecordById(record.protectionId, record.chainId, record.contractAddress)).toEqual({
+        fileHash: record.fileHash,
+        txHash: record.txHash,
+        blockHash: record.blockHash,
+      });
+      expect(findProtectionRecordById(record.protectionId, '0x1', record.contractAddress)).toBeNull();
     } finally {
       if (previousPath === undefined) delete process.env['FILE_PROTECTION_INDEX_PATH'];
       else process.env['FILE_PROTECTION_INDEX_PATH'] = previousPath;

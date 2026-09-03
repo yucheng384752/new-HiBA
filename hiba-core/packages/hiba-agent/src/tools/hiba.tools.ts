@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
 import { defineTool } from '../core/defineTool';
 import type { HiBAToolbox } from '../core/HiBAToolbox';
 import type { ToolContext } from '../types/hiba.types';
-import { findProtectionRecord, saveProtectionRecord } from './FileProtectionIndex';
+import { findProtectionRecordById, saveProtectionRecord } from './FileProtectionIndex';
 
 // ── Shared sub-schemas ────────────────────────────────────────────────────────
 
@@ -23,6 +23,7 @@ const notImplemented = async (): Promise<never> => {
 // ── Helper: Java HiBA + Web3 RPC bridge ──────────────────────────────────────
 
 type ChainRecord = { txHash: string; blockHash: string };
+type TransactionReceipt = { status: string };
 type HibaFile = { success?: boolean; fileHash?: string; metadata?: { verdict?: string } };
 type HibaResponse = { success: boolean; data?: { files?: HibaFile[] } };
 
@@ -81,6 +82,12 @@ async function latestBlockNumber(): Promise<number> {
   return Number.parseInt(await rpc<string>('eth_blockNumber', []), 16);
 }
 
+async function receiptStatus(txHash: string): Promise<string> {
+  const receipt = await rpc<TransactionReceipt | null>('eth_getTransactionReceipt', [txHash]);
+  if (receipt === null) throw new Error(`Transaction receipt not found for ${txHash}`);
+  return receipt.status;
+}
+
 async function chainContext(): Promise<{ chainId: string; contractAddress: string }> {
   const chainId = await rpc<string>('eth_chainId', []);
   const contractAddress = process.env['FILE_PROTECTION_CONTRACT_ADDRESS'];
@@ -132,8 +139,14 @@ const materialProtectFile = defineTool({
     keepFile: z.boolean().default(true).describe('是否保留本地檔案'),
   }),
   outputSchema: z.object({
-    success: z.boolean(),
-    txHash:  z.string().describe('區塊鏈交易 hash'),
+    success:         z.boolean(),
+    protectionId:    z.string().uuid().describe('內容無關的穩定保護 ID'),
+    fileHash:         z.string().describe('受保護檔案 hash'),
+    txHash:           z.string().describe('區塊鏈交易 hash'),
+    blockHash:        z.string().describe('區塊 hash'),
+    chainId:          z.string().describe('鏈 ID（hex）'),
+    contractAddress:  z.string().describe('FileProtection 合約地址'),
+    receiptStatus:    z.string().describe('交易 receipt status'),
   }),
   permissions: ['material.write'],
   timeout: 30_000,
@@ -146,8 +159,12 @@ const materialProtectFile = defineTool({
       throw new Error('Java HiBA did not protect the file');
     }
     const chain = await findProtectionTransaction(before, await latestBlockNumber(), fileHash);
-    saveProtectionRecord({ fileHash, ...await chainContext(), ...chain });
-    return { success: true, txHash: chain.txHash };
+    const context = await chainContext();
+    const protectionId = randomUUID();
+    const status = await receiptStatus(chain.txHash);
+    if (status !== '0x1') throw new Error(`FileProtection transaction failed with receipt status ${status}`);
+    saveProtectionRecord({ protectionId, fileHash, ...context, ...chain });
+    return { success: true, protectionId, fileHash, ...chain, ...context, receiptStatus: status };
   },
 });
 
@@ -157,26 +174,40 @@ const materialVerifyFile = defineTool({
   tags: ['material', 'read'],
   description: '驗證檔案 metadata 是否與鏈上記錄一致',
   inputSchema: z.object({
-    filePath: z.string().describe('檔案絕對路徑'),
+    filePath:     z.string().describe('檔案絕對路徑'),
+    protectionId: z.string().uuid().describe('material.protectFile 回傳的穩定保護 ID'),
   }),
   outputSchema: z.object({
-    isValid:   z.boolean().describe('驗證結果'),
-    txHash:    z.string().describe('上鏈交易 hash'),
-    blockHash: z.string().describe('區塊雜湊'),
+    isValid:          z.boolean().describe('驗證結果'),
+    protectionId:     z.string().uuid(),
+    expectedHash:     z.string().describe('原始保護 hash'),
+    actualHash:       z.string().describe('目前檔案 hash'),
+    verdict:          z.string().describe('Java HiBA 驗證結果'),
+    txHash:           z.string().describe('上鏈交易 hash'),
+    blockHash:        z.string().describe('區塊雜湊'),
+    chainId:          z.string().describe('鏈 ID（hex）'),
+    contractAddress:  z.string().describe('FileProtection 合約地址'),
+    receiptStatus:    z.string().describe('原始保護交易 receipt status'),
   }),
   permissions: ['material.read'],
   timeout: 15_000,
   retryPolicy: { maxAttempts: 2, initialDelayMs: 500, backoffMultiplier: 2, retryOn: ['TOOL_TIMEOUT'] },
   handler: async (input, ctx) => {
+    const context = await chainContext();
+    const chain = findProtectionRecordById(input.protectionId, context.chainId, context.contractAddress);
+    if (chain === null) throw new Error('No protection transaction indexed for this protection ID, chain, and contract');
     const { response, fileHash } = await hibaFileRequest(ctx, 'BlockchainFileIntegrity', input.filePath);
     const file = response.data?.files?.[0];
-    const context = await chainContext();
-    const chain = findProtectionRecord(fileHash, context.chainId, context.contractAddress);
-    if (chain === null) throw new Error('No protection transaction indexed for this file, chain, and contract');
+    const verdict = file?.metadata?.verdict ?? 'VERIFICATION_FAILED';
     return {
-      isValid: response.success && file?.success === true && file.metadata?.verdict === 'VERIFICATION_SUCCESSFUL',
-      txHash: chain.txHash,
-      blockHash: chain.blockHash,
+      isValid: response.success && file?.success === true && verdict === 'VERIFICATION_SUCCESSFUL' && fileHash === chain.fileHash,
+      protectionId: input.protectionId,
+      expectedHash: chain.fileHash,
+      actualHash: fileHash,
+      verdict,
+      ...chain,
+      ...context,
+      receiptStatus: await receiptStatus(chain.txHash),
     };
   },
 });
@@ -818,10 +849,33 @@ const materialReadAttachment = defineTool({
     preview:   z.string().describe('前 N 行或 JSON 摘要'),
     dataType:  z.enum(['json', 'text']),
     summary:   z.string().optional().describe('內容類型與筆數的一句話摘要'),
+    filePath:  z.string().describe('Agent 暫存路徑，供後續 material tools 使用'),
   }),
   permissions: ['material.read'],
   timeout: 10_000,
-  handler: notImplemented,
+  handler: async input => {
+    if (!input._filePath) throw new Error('No attachment was uploaded');
+    const bytes = await readFile(input._filePath);
+    const text = bytes.toString('utf8');
+    const lines = text.split(/\r?\n/);
+    let dataType: 'json' | 'text' = 'text';
+    let summary = `${lines.length} lines of text`;
+    try {
+      const value = JSON.parse(text) as unknown;
+      dataType = 'json';
+      summary = Array.isArray(value) ? `JSON array with ${value.length} items` : 'JSON document';
+    } catch { /* text attachment */ }
+    return {
+      success: true,
+      fileName: input._fileName ?? basename(input._filePath),
+      sizeBytes: bytes.byteLength,
+      lineCount: lines.length,
+      preview: lines.slice(0, input.maxRows).join('\n'),
+      dataType,
+      summary,
+      filePath: input._filePath,
+    };
+  },
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

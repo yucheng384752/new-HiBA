@@ -679,6 +679,7 @@
       <div class="tab" data-tab="scripts" onclick="switchTab('scripts')">Script List</div>
       <div class="tab" data-tab="deploy" onclick="switchTab('deploy')">Deploy</div>
       <div class="tab" data-tab="workflow" onclick="switchTab('workflow')">Plan</div>
+      <div class="tab" data-tab="blockchain" onclick="switchTab('blockchain')">Web3 Verify</div>
       <div class="tab" data-tab="linetopo" onclick="switchTab('linetopo')">產線拓樸</div>
       <div class="tab" data-tab="stream" onclick="switchTab('stream')">Stream</div>
       <div class="tab" data-tab="curl" onclick="switchTab('curl')">Curl</div>
@@ -703,6 +704,29 @@
       <!-- Plan Tab -->
       <div class="tab-pane" id="tab-workflow">
         <div class="empty-state"><div class="icon">🧩</div>任務鏈已顯示於輸入框下方</div>
+      </div>
+
+      <!-- Real Web3 file evidence; deliberately does not use /api/blockchain/* mock routes. -->
+      <div class="tab-pane" id="tab-blockchain">
+        <div class="script-item" style="padding:16px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <strong>Blockchain File Verification</strong>
+            <span class="badge status" style="color:var(--green)">REAL MATERIAL TOOL</span>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">經由 <code>/api/execute</code> 呼叫 material.protectFile / material.verifyFile；不使用 <code>mode: mock</code> 端點。</p>
+          <div class="attach-bar" id="attachBar_blockchainEvidence">
+            <button class="attach-btn" onclick="triggerAttachPicker('blockchainEvidence')">📎 選擇驗證檔案</button>
+            <span style="font-size:11px;color:var(--muted)">.json,.txt,.csv,.tsv,.log,.md · 上限 512KB</span>
+            <input type="file" id="attachInput_blockchainEvidence" accept=".json,.txt,.csv,.tsv,.log,.md" style="display:none"
+              onchange="onAttachSelected(this,'blockchainEvidence');resetBlockchainEvidence()">
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+            <button class="run-btn" onclick="protectBlockchainFile()">Protect</button>
+            <button class="run-btn" onclick="verifyBlockchainFile(false)">Verify</button>
+            <button class="run-btn" onclick="verifyBlockchainFile(true)">Tamper Test (1 character)</button>
+          </div>
+          <div id="blockchainEvidenceResult" aria-live="polite"></div>
+        </div>
       </div>
 
       <!-- Line Topology Tab（產線物理拓樸，非左側的節點網路拓樸） -->
@@ -730,7 +754,7 @@
 // ── Constants ──────────────────────────────────────────────────────────────
 const AGENT_ID  = 'claw-dashboard';
 const LS_KEYS   = { favorites: 'claw_favorites', shellHistory: 'claw_shell_history' };
-const TAB_NAMES = ['health', 'scripts', 'deploy', 'workflow', 'linetopo', 'stream', 'curl'];
+const TAB_NAMES = ['health', 'scripts', 'deploy', 'workflow', 'blockchain', 'linetopo', 'stream', 'curl'];
 
 // ── State ──────────────────────────────────────────────────────────────────
 const nodes = new Map(); // nodeId → { url, status, health, scripts }
@@ -2143,6 +2167,7 @@ function getAttachmentData(uid) {
 
 function clearAttachment(uid) {
   attachments.delete(uid);
+  if (uid === 'blockchainEvidence') resetBlockchainEvidence();
   const bar = document.getElementById(`attachBar_${uid}`);
   if (bar) bar.innerHTML = `
     <button class="attach-btn" onclick="triggerAttachPicker('${uid}')">📎 附加文件</button>
@@ -2177,6 +2202,83 @@ function onAttachSelected(input, uid) {
     toast(`✓ 已附加 ${file.name}`, 'var(--green)');
   };
   reader.readAsText(file, 'utf-8');
+}
+
+let blockchainFilePath = null;
+let blockchainProtection = null;
+
+function resetBlockchainEvidence() {
+  blockchainFilePath = null;
+  blockchainProtection = null;
+  const el = document.getElementById('blockchainEvidenceResult');
+  if (el) el.innerHTML = '';
+}
+
+async function executeMaterial(toolName, input) {
+  const res = await safeFetch(`${workflowPlanningUrl.replace(/\/+$/, '')}/api/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Trace-Id': genTraceId(), 'X-Agent-Id': AGENT_ID },
+    body: JSON.stringify({ toolName, input }),
+    timeout: 35000,
+  });
+  const result = await res.json();
+  if (!res.ok || !result.success) throw new Error(result.error || `HTTP ${res.status}`);
+  return result.output;
+}
+
+async function landBlockchainAttachment(content) {
+  const attachment = getAttachmentData('blockchainEvidence');
+  if (!attachment) throw new Error('請先選擇檔案');
+  return executeMaterial('material.readAttachment', {
+    _attachment: { name: attachment.name, content },
+    maxRows: 20,
+  });
+}
+
+function renderBlockchainEvidence(title, output) {
+  const fields = ['protectionId', 'isValid', 'verdict', 'expectedHash', 'actualHash', 'fileHash', 'txHash', 'blockHash', 'chainId', 'contractAddress', 'receiptStatus'];
+  const rows = fields.filter(key => output[key] !== undefined).map(key =>
+    `<tr><th>${escapeHtml(key)}</th><td style="word-break:break-all">${escapeHtml(String(output[key]))}</td></tr>`
+  ).join('');
+  document.getElementById('blockchainEvidenceResult').innerHTML = `
+    <div class="result-box ${output.isValid === false ? 'err' : 'ok'}" style="margin-top:12px">
+      <div class="result-meta"><strong>${escapeHtml(title)}</strong><span style="margin-left:auto">real Web3 material tool</span></div>
+      <table><tbody>${rows}</tbody></table>
+    </div>`;
+}
+
+async function protectBlockchainFile() {
+  try {
+    const attachment = getAttachmentData('blockchainEvidence');
+    if (!attachment) throw new Error('請先選擇檔案');
+    const landed = await landBlockchainAttachment(attachment.content);
+    blockchainFilePath = landed.filePath;
+    blockchainProtection = await executeMaterial('material.protectFile', { filePath: blockchainFilePath, keepFile: true });
+    renderBlockchainEvidence('Protect 成功', blockchainProtection);
+  } catch (error) {
+    toast(`Protect 失敗：${error.message}`, 'var(--red)');
+  }
+}
+
+async function verifyBlockchainFile(tamper) {
+  try {
+    const attachment = getAttachmentData('blockchainEvidence');
+    if (!attachment) throw new Error('請先選擇檔案');
+    if (!blockchainProtection) throw new Error('請先完成 Protect');
+    let filePath = blockchainFilePath;
+    if (tamper) {
+      if (!attachment.content.length) throw new Error('空檔案無法執行單字元篡改測試');
+      const first = attachment.content[0] === 'X' ? 'Y' : 'X';
+      filePath = (await landBlockchainAttachment(first + attachment.content.slice(1))).filePath;
+    }
+    const output = await executeMaterial('material.verifyFile', {
+      filePath,
+      protectionId: blockchainProtection.protectionId,
+    });
+    renderBlockchainEvidence(tamper ? 'Tamper Test 結果' : 'Verify 結果', output);
+  } catch (error) {
+    toast(`Verify 失敗：${error.message}`, 'var(--red)');
+  }
 }
 
 // ── Workflow Tab ──────────────────────────────────────────────────────────────

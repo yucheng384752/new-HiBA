@@ -1,7 +1,8 @@
 import http from 'node:http';
-import { createHash } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { createHash, randomUUID } from 'node:crypto';
+import { mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { basename, extname, join } from 'node:path';
 import type { NLPlanningService, NodeResourceMap } from '../planning/NLPlanningService';
 import type { HiBAToolbox } from '../core/HiBAToolbox';
 import type { ToolContext } from '../types/hiba.types';
@@ -71,17 +72,66 @@ interface AuditAnchorRecord {
   records: unknown[];
 }
 
-async function readBody(req: http.IncomingMessage): Promise<unknown> {
+async function readBody(req: http.IncomingMessage, maxBytes = Number.POSITIVE_INFINITY): Promise<unknown> {
   return new Promise((resolve, reject) => {
     let buf = '';
+    let bytes = 0;
+    let tooLarge = false;
     req.setEncoding('utf8');
-    req.on('data', c => { buf += c; });
+    req.on('data', c => {
+      bytes += Buffer.byteLength(c);
+      if (bytes > maxBytes) tooLarge = true;
+      else if (!tooLarge) buf += c;
+    });
     req.on('end', () => {
+      if (tooLarge) { reject(new Error(`Request body exceeds ${maxBytes} bytes`)); return; }
       try { resolve(buf ? JSON.parse(buf) : {}); }
       catch { reject(new Error('Invalid JSON body')); }
     });
     req.on('error', reject);
   });
+}
+
+const ATTACHMENT_MAX_BYTES = 512 * 1024;
+const ATTACHMENT_BODY_MAX_BYTES = 1024 * 1024;
+const ATTACHMENT_EXTENSIONS = new Set(['.json', '.txt', '.csv', '.tsv', '.log', '.md']);
+
+async function landAttachment(rawInput: unknown): Promise<Record<string, unknown>> {
+  if (typeof rawInput !== 'object' || rawInput === null || Array.isArray(rawInput)) return {};
+  const input = { ...rawInput } as Record<string, unknown>;
+  delete input['_filePath'];
+  delete input['_fileName'];
+  const attachment = input['_attachment'];
+  delete input['_attachment'];
+  if (attachment === undefined) return input;
+  if (typeof attachment !== 'object' || attachment === null || Array.isArray(attachment)) {
+    throw new Error('"_attachment" must contain string "name" and "content" fields');
+  }
+  const { name, content } = attachment as { name?: unknown; content?: unknown };
+  if (typeof name !== 'string' || typeof content !== 'string') {
+    throw new Error('"_attachment" must contain string "name" and "content" fields');
+  }
+  const extension = extname(name).toLowerCase();
+  if (!ATTACHMENT_EXTENSIONS.has(extension)) {
+    throw new Error(`Attachment type must be one of: ${[...ATTACHMENT_EXTENSIONS].join(', ')}`);
+  }
+  const data = Buffer.from(content, 'utf8');
+  if (data.byteLength > ATTACHMENT_MAX_BYTES) throw new Error('Attachment exceeds 524288 bytes');
+
+  const root = process.env['HIBA_ATTACHMENT_DIR'] ?? join(tmpdir(), 'hiba-agent-attachments');
+  const ttlMs = Number(process.env['HIBA_ATTACHMENT_TTL_MS'] ?? 3_600_000);
+  await mkdir(root, { recursive: true });
+  const now = Date.now();
+  await Promise.all((await readdir(root, { withFileTypes: true })).map(async entry => {
+    if (!entry.isDirectory()) return;
+    const path = join(root, entry.name);
+    if (now - (await stat(path)).mtimeMs > ttlMs) await rm(path, { recursive: true, force: true });
+  }));
+  const dir = join(root, randomUUID());
+  const path = join(dir, `upload${extension}`);
+  await mkdir(dir);
+  await writeFile(path, data, { flag: 'wx' });
+  return { ...input, _filePath: path, _fileName: basename(name) };
 }
 
 // ── Intent Parsing ────────────────────────────────────────────────────────────
@@ -425,7 +475,7 @@ export class AgentServer {
           jsonError(res, 503, 'SERVICE_UNAVAILABLE', 'Toolbox not configured on this server');
           return;
         }
-        const body = (await readBody(req)) as { toolName?: string; input?: unknown };
+        const body = (await readBody(req, ATTACHMENT_BODY_MAX_BYTES)) as { toolName?: string; input?: unknown };
         if (!body.toolName) {
           jsonError(res, 400, 'REQUEST_INVALID', '"toolName" is required');
           return;
@@ -437,9 +487,16 @@ export class AgentServer {
           hibaBaseUrl: this.options.defaultCtx?.hibaBaseUrl ?? 'http://localhost:8092',
           permissions: this.options.defaultCtx?.permissions ?? [],
         };
+        let input: Record<string, unknown>;
+        try {
+          input = await landAttachment(body.input ?? {});
+        } catch (error) {
+          jsonError(res, 400, 'REQUEST_INVALID', error instanceof Error ? error.message : String(error));
+          return;
+        }
         const result = await this.options.toolbox.execute(
           body.toolName as never,
-          body.input ?? {},
+          input,
           ctx,
         );
         json(res, result.success ? 200 : 422, result);
