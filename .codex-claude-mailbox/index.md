@@ -4,4 +4,4 @@
 | --- | --- | --- | --- | --- | --- |
 | 20260903-hiba-web3-persistent-index | HiBA-AB Web3 持久化交易索引 | completed | none | none | 2026-09-03T14:23:53+08:00 |
 | 20260903-dashboard-web3-verification | Dashboard 真實 Web3 操作與驗證介面 | completed | claude | claude | 2026-09-03T17:45:00+08:00 |
-| 20260903-multinode-transfer-nl-workflow | 多節點檔案傳輸與自然語言 Workflow 串接 | draft | none | none | 2026-09-03T18:10:00+08:00 |
+| 20260903-multinode-transfer-nl-workflow | 多節點檔案傳輸 | draft | none | none | 2026-09-03T19:30:00+08:00 |
