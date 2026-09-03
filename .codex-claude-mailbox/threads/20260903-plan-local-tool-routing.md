@@ -7,7 +7,7 @@ reviewer: "claude"
 priority: "high"
 created_by: "claude"
 created_at: "2026-09-03T21:40:00+08:00"
-updated_at: "2026-09-03T22:00:00+08:00"
+updated_at: "2026-09-03T23:10:00+08:00"
 role_priority:
   implementation: "codex"
   review: "claude"
@@ -138,6 +138,90 @@ Codex 在同一個 session 稍早才成功寫過其他 thread 檔案，判斷比
 如果又遇到同樣的唯讀錯誤，不要重複嘗試超過一次，直接回報，改由 Claude
 接手把 Codex 給的內容手動寫入（就像這次一樣）。
 
+## 實作派工與再次唯讀錯誤（Codex，2026-09-03）
+
+方向 2 核准後重新派工實作，Codex 這次同樣回報「workspace is read-only」，
+`apply_patch` 被拒絕。依照上面環境注意事項的指示（遇到同樣錯誤不要重複
+嘗試超過一次），Codex 沒有再重試，改成直接把準備好的完整內容（程式碼
+patch、測試、Test Results/Decisions/Session Summary 文字）輸出在回應
+文字裡，交給 Claude 手動套用。Codex 這邊的驗證是在記憶體內模擬完成的，
+不是對真正落地的檔案跑的，這點很重要，見下一節。
+
+## Claude 實際套用並用真實 live 環境重新驗證（2026-09-03，非 Codex 的記憶體內模擬）
+
+Codex 沒有寫入權限，但 Claude 對這個 repo 有正常寫入權限，所以由 Claude
+把 Codex 準備好的內容手動套用到實際檔案，並重新做一次完整的 live 驗證
+（不是只信任 Codex 回報的「模擬通過」）：
+
+**套用的變更**（`HttpLLMClient.ts`，尚未 commit）：
+- `nodeId` 的 placeholder 說明文字，從
+  `"<an online node from Live Node Descriptors>"` 改成
+  `"<an online node from Live Node Descriptors, or local per Rule 3>"`。
+- Rule 3 從「`nodeId` must be an online node that advertises the tool,
+  or an online node with `canInstall=true`」，擴充成額外一段：「若任務
+  沒有指定節點，且 Available Tools 裡列出的某個工具，找不到任何 online
+  節點能執行/安裝，就用 `nodeId: "local"` 在 hiba-agent 本機 toolbox
+  執行；但如果任務明確指定了某個節點，不能因為這個規則就改用 `local`
+  取代」。
+- `HttpLLMClient.test.ts` 新增一個測試，斷言重建出來的 system prompt
+  裡確實包含上述新文字——這個測試**通過**（`npm test`：201 passed，
+  比之前多 1 個，0 failed），但這個測試只驗證「新文字有沒有被塞進
+  prompt 字串」，不驗證「模型看到這段文字後會不會真的照做」，這正是
+  下面發現問題的地方。
+
+**驗證步驟與結果（依序執行）**：
+1. `npm run typecheck`（`hiba-core/packages/hiba-agent`）——乾淨無錯誤。
+2. `npm test`——201 passed / 1 skipped / 0 failed。
+3. 重啟真實 `AgentServer`（砍掉舊 PID，`npm run start:env` 重新啟動，
+   確認新的 process 有在 8090 port 回應），確保改動真的被載入。
+4. 重送原本失敗的那次真實 `/api/plan` 請求（保護附件檔案的任務）——
+   **結果跟修正前完全一樣**，仍然是 `AGENT_NOT_REGISTERED`
+   （`No online node can execute 'material.protectFile@1.0.0'`）。
+5. 用 `tools/print-system-prompt.ts` 重建當次送出的真實 prompt，
+   grep 確認新的 Rule 3 文字**確實存在**於送給模型的 prompt 裡
+   （排除「修正沒被載入」這個可能性）。
+6. 換一個更簡單的任務（「保護這個檔案」）——同樣失敗。
+7. 繞過 `NLPlanningService`/`validatePlan`，直接用 `temperature=0`
+   把同一份真實 prompt 送給 Ollama，拿模型的原始輸出：
+   ```
+   {"toolName":"material.protectFile","nodeId":"node1","input":{"filePath":"a.xml",...}}
+   ```
+8. grep 整份 prompt，找到根因：prompt 裡的「Example 2」（一個
+   `material.verifyFile` → `protectFile` 兩步驟 worked example，剛好
+   就是同一個工具）使用了字面值 `nodeId:"node1"`、`filePath:"a.xml"`。
+   模型完全照抄這個範例的字面值，無視新加的 Rule 3 文字。
+
+**結論修正（推翻上面「核准方向 2，可以進入實作」的結論）**：
+
+方向 2 的最小 prompt 規則修改，經過真實 live 環境重新驗證，**不足以
+解決問題**。根因不是「模型不知道 local 是合法選項」這麼單純——這段
+新規則文字確實有被送進 prompt，但 worked example 裡的字面值範例對
+這個模型的「照抄範例」拉力，強過抽象規則文字的約束力。這跟這個
+session 前面已經確立的「這個模型對 prompt 形狀/worked example 特別
+敏感」的發現（`plan_LLM_訓練清單.md` §十五-§十七）是同一種現象，只是
+這次影響的是最簡單的單步驟案例，不是原本 Codex 提案裡當作邊角案例
+看待的「異質工作流程」情境。
+
+Codex 回報的「記憶體內模擬通過」跟這次真實 live 驗證的結果不一致——
+差別在於 Codex 的模擬顯然沒有真的重建含 worked examples 的完整生產
+prompt 去問真正的模型，只驗證了新文字有沒有被組進去。這是本 thread
+到目前為止唯一一次出現「Codex 自我回報通過」跟「Claude 獨立 live 驗證」
+結果矛盾的案例，記錄下來避免下次重蹈覆轍：**這類 prompt 行為修正，
+"prompt 裡有沒有這段文字" 跟 "真的送真實模型會不會照做" 是兩件必須
+分開驗證的事，只驗證前者不能宣稱修正完成。**
+
+要真正解決，範圍會比原本核准的「只加一句 Rule 文字」大：至少需要
+處理 worked example 本身，例如（1）把 Example 2 的字面值換成更明顯是
+「範例佔位符」而非可照抄真實值的形式，或（2）額外加一個示範 `local`
+用法的 worked example，讓模型有具體樣式可以照抄，而不是只靠抽象規則
+文字對抗另一個範例的字面值拉力。這是比目前核准範圍更大的 prompt 形狀
+改動，需要重新討論／核准，不能直接沿用方向 2 的核准繼續做。
+
+`HttpLLMClient.ts`/`HttpLLMClient.test.ts` 目前的改動維持不 revert
+（規則文字本身語意正確，之後處理 worked example 時仍然需要這個基礎），
+但視為「必要但不足夠」的中間增量，會用誠實的 commit message 說明，
+本 thread 狀態繼續維持非 completed，不進 review_requested。
+
 # Review Findings
 
 （尚未審查——本 thread 還沒有 Codex 實作可供審查）
@@ -157,28 +241,36 @@ Codex 在同一個 session 稍早才成功寫過其他 thread 檔案，判斷比
 
 # Session Summary
 
-本 thread 尚未開始實作。已用真實 Ollama/Accounting/hiba-agent 三個 live
-服務驗證出這個缺口的存在與確切根因（system prompt 從未提及 `local` 是
-合法 nodeId，即使執行/驗證層都已支援），下一步交給 Codex investigate 並
-提案修正方式。
+已用真實 Ollama/Accounting/hiba-agent 三個 live 服務，驗證出這個缺口的
+存在與確切根因（system prompt 從未提及 `local` 是合法 nodeId，即使
+執行/驗證層都已支援）。Codex 提案並實作了方向 2（擴充 Rule 3 文字），
+Claude 核准後把 Codex 準備的內容手動套用到真實檔案（Codex 沙箱唯讀，
+無法自己寫入），typecheck／單元測試都過。但接著用真實 live 環境
+（重啟 AgentServer + 重送原本失敗的請求 + 直接對 Ollama 做
+`temperature=0` 原始查詢）重新驗證，發現**方向 2 不足以解決問題**：
+prompt 裡「Example 2」worked example 的字面值（`node1`/`a.xml`）對這個
+模型的照抄拉力，強過新加的抽象規則文字，模型仍然產生會觸發
+`AGENT_NOT_REGISTERED` 的計畫。Codex 記憶體內模擬回報的「通過」跟這次
+真實 live 驗證結果矛盾，根因是模擬沒有用含完整 worked examples 的真實
+生產 prompt 去問真正的模型。目前 `HttpLLMClient.ts`/`.test.ts` 的改動
+保留但不 commit 為「已解決」，thread 繼續維持非 completed 狀態，等待
+下一步方向（處理 worked example 本身）重新討論／核准。
 
 # Open Questions
 
-- **修正方向未定案，Codex 應該提案而非直接實作**：至少兩個候選方向，
-  1. 讓 `NLPlanningService.plan()` 合成一個代表 hiba-agent 本機的虛擬
-     `NodeDescriptor`（例如 `nodeId: 'local', status: 'online'`，
-     `resources` 帶入本機 toolbox 的完整工具清單），塞進送給 LLM 的
-     `nodes`/`resources`，讓它自然出現在「Live Node Descriptors」裡，
-     不需要改 Rules 文字本身。
-  2. 在 `buildDefaultSystemPrompt()` 的 Rules 或另一個區塊明確加一句
-     「沒有掛載在任何線上節點上的工具，使用 `nodeId: 'local'`」，不用
-     合成假節點，直接講規則。
-  - 兩者都會改變 LLM 實際看到的 prompt 內容——**這正是這個 session 已經
-    證實過的高風險區域**（§十五-§十七 的縮減工具目錄教訓），Codex 應該
-    在提案裡明講風險評估：哪個方向對既有 prompt 結構改動較小、較不容易
-    讓模型對其他既有案例（已經測過會正確用真實節點 ID 的那些任務）
-    產生非預期的行為改變。不確定風險大小時，應該建議搭配
-    `benchmark_quality.py` 或至少手動跑幾個既有已知案例做前後對照，
-    不要只憑直覺判斷「應該不會有影響」。
-  - **已解決**：Codex 提案方向 2（擴充 Rule 3 文字 + 調整 nodeId
-    placeholder），Claude 已核准，見上方 Claude Notes。可以進入實作。
+- ~~修正方向未定案~~ **方向 2 已核准並實作，但 live 驗證證實不足夠**
+  （見上方「Claude 實際套用並用真實 live 環境重新驗證」）。
+- **待決定（新）**：如何處理 worked example 本身對模型的字面值拉力，
+  至少兩個候選方向，尚未討論／核准，需要使用者/Claude 一起決定：
+  1. 把 Example 2（`material.verifyFile`→`protectFile`）裡的
+     `nodeId:"node1"`、`filePath:"a.xml"` 換成更明顯是佔位符、不該被
+     直接照抄的形式（例如更醒目的 placeholder 語法），降低字面值拉力，
+     同時不新增 prompt 長度。
+  2. 額外加一個示範 `nodeId:"local"` 用法的 worked example，讓模型有
+     具體的「照抄樣式」可用，但這會增加 prompt 長度，且是這個 session
+     已經證實過的高風險區域（worked example 對這個模型的影響力極大），
+     需要比照 §十五-§十七 的方法論，用 `benchmark_quality.py` 或至少
+     手動跑幾個既有已知案例（含真實線上節點路由案例）做前後 A/B 對照，
+     確認沒有讓模型整體變得更容易誤判節點，才能核准。
+  - 這是比原本核准範圍更大的 prompt 形狀改動，在有新方向核准前，不要
+    再直接派工實作。
