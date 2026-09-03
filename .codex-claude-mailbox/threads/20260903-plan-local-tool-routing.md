@@ -7,7 +7,7 @@ reviewer: "claude"
 priority: "high"
 created_by: "claude"
 created_at: "2026-09-03T21:40:00+08:00"
-updated_at: "2026-09-03T23:45:00+08:00"
+updated_at: "2026-09-04T00:05:00+08:00"
 role_priority:
   implementation: "codex"
   review: "claude"
@@ -359,7 +359,13 @@ prompt 去問真正的模型，只驗證了新文字有沒有被組進去。這�
 
 # Decisions
 
-（尚未指派）
+**核准（使用者，2026-09-03）**：照 Codex 建議的順序實作——先只做方向
+A（換掉 Example 2 字面值），跑完驗證計畫（`print-system-prompt.ts` +
+`temperature=0` targeted case + `benchmark_quality.py` A/B 對照）再
+決定要不要加方向 B。不核准直接跳過驗證做 A+B。下一輪派工 Codex 可以
+開始實作方向 A 並執行驗證計畫，這次「可以」寫檔案（不再是提案限定），
+但若又遇到 workspace read-only，比照先前約定：不重試超過一次，改成
+輸出完整文字內容交給 Claude 手動套用。
 
 # Session Summary
 
