@@ -7,7 +7,7 @@ reviewer: "claude"
 priority: "high"
 created_by: "claude"
 created_at: "2026-09-03T21:40:00+08:00"
-updated_at: "2026-09-03T21:40:00+08:00"
+updated_at: "2026-09-03T22:00:00+08:00"
 role_priority:
   implementation: "codex"
   review: "claude"
@@ -81,10 +81,34 @@ hiba-agent 三者都實際啟動）驗證過，不是理論推測**：
 
 # Codex Notes
 
-（尚未實作——請先investigate 並提案，不要直接動手改
-`buildDefaultSystemPrompt()` 或 `NLPlanningService.plan()`，理由見下方
-Open Questions：這是核心 prompt 組裝邏輯，這個 session 已經證實部署中的
-模型對 prompt 形狀改動異常敏感，任何改動都要先評估風險再動工。）
+## 調查與提案（Codex，2026-09-03；透過 `/codex:result` 手動補寫進 thread）
+
+> 這次 Codex 執行環境本身回報「workspace is read-only，apply_patch 被拒絕」，
+> 沒辦法自己把結果寫回這個檔案，調查內容是由 Claude 從 `/codex:result` 的
+> 輸出手動轉貼進來的，不是 Codex 自己寫的——內容本身已經是 Codex 完成調查後
+> 的產出，只是寫入管道這次失敗了。
+
+**已用 live 服務重現問題**：Ollama `11434`、Accounting `9090`、hiba-agent
+`8090` 都回 HTTP 200；實際送 `/api/plan` 重現出跟 Claude 一樣的結果——
+`material.protectFile@1.0.0` 回傳空 `steps` + `AGENT_NOT_REGISTERED`。
+根因確認跟 Claude 的 Current Context 一致：prompt 只允許 online 節點，
+但 `validatePlan()`／`OrchestratorRunner` 已經支援 `nodeId: "local"`。
+
+**建議採方向 2（明確 prompt 規則），不建議方向 1（合成虛擬節點描述）**：
+
+- 合成虛擬 `local` 節點描述會把完整的 37-tool 目錄複製一份塞進 Live
+  Node Descriptors 區塊（估算每個 capability list ~1030 字元），大幅
+  改變 prompt 形狀，且有風險讓原本該用真實節點的任務被誤導去用 `local`。
+- 改採方向 2：(a) 調整 `nodeId` 的 placeholder 文字；(b) 擴充 Rule 3——
+  「沒有指定節點的任務，只有在沒有任何 online 節點能執行/安裝該工具時，
+  才使用 `local`」。這是對既有 prompt 結構改動最小的做法。
+
+**提議的驗證計畫**（尚未執行）：本機單/多步驟案例、既有已知案例
+（如 `node1` 路由）修正後維持不變、明確指定但不可用節點時的行為、
+prompt 長度前後對照、以及比照 production 形狀的 A/B benchmark。
+
+（實作前仍需 Claude／使用者核准這個方向，且需要重新確認 Codex 這次的
+寫入環境問題不會在實作階段又發生——見下方 Claude Notes。）
 
 # Claude Notes
 
@@ -92,6 +116,27 @@ Live 驗證過程與根因定位記錄於上方 Current Context，逐行讀過
 `HttpLLMClient.ts`、`validatePlan.ts`、`OrchestratorRunner.ts` 相關程式碼
 後確認：這是 prompt 層級的資訊缺口，不是驗證或執行邏輯的 bug，執行端
 已經完整支援 `local`。
+
+## 提案審查（Claude，2026-09-03）——核准方向 2，補寫入環境注意事項
+
+**核准方向 2（明確 prompt 規則），不採方向 1**。Codex 的理由站得住腳：
+方向 1 把 37 個工具的完整目錄複製進 Live Node Descriptors，等於同一份
+資訊在 prompt 裡重複兩次，對 prompt 大小跟形狀的影響遠比方向 2 大，跟
+這個 session 已經確立的「盡量減少對這個模型 prompt 形狀的擾動」原則
+不符。方向 2 只加一句 Rule 文字，改動面小很多，是對的選擇。
+
+驗證計畫（本機案例／既有案例不受影響／明確指定不可用節點／prompt 長度
+對照／A/B benchmark）涵蓋了我原本要求的風險評估，沒有遺漏，核准直接
+照這個做，不需要再補細節。
+
+**環境注意事項**：這次 Codex 的執行環境回報「workspace is read-only」
+導致寫不回這個檔案，跟這個對話 session 稍早在訓練那條線上踩過的沙箱
+寫入限制（`plan_LLM_訓練清單.md` §二十）性質類似但範圍不同——那次是
+完全無法寫任何暫存檔，這次是能完成調查、只是寫不回這個特定檔案，且
+Codex 在同一個 session 稍早才成功寫過其他 thread 檔案，判斷比較像是
+暫時性問題，不是這個檔案／路徑本身有結構性障礙。實作階段重新派工時，
+如果又遇到同樣的唯讀錯誤，不要重複嘗試超過一次，直接回報，改由 Claude
+接手把 Codex 給的內容手動寫入（就像這次一樣）。
 
 # Review Findings
 
@@ -135,3 +180,5 @@ Live 驗證過程與根因定位記錄於上方 Current Context，逐行讀過
     產生非預期的行為改變。不確定風險大小時，應該建議搭配
     `benchmark_quality.py` 或至少手動跑幾個既有已知案例做前後對照，
     不要只憑直覺判斷「應該不會有影響」。
+  - **已解決**：Codex 提案方向 2（擴充 Rule 3 文字 + 調整 nodeId
+    placeholder），Claude 已核准，見上方 Claude Notes。可以進入實作。
