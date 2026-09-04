@@ -296,6 +296,42 @@ export class AuditTrail implements AuditWriter {
     return Promise.resolve(rows.map(rowToRecord));
   }
 
+  /**
+   * 域內最近成功案例，供 orchestrator.retrieveContext 的 exemplars 檢索使用
+   * （規格：實作規格/plan()_LLM生成品質改善與輕量RAG檢索設計.md §六）。
+   * 這是結構化查詢，不需要 embedding——語意相似任務的檢索留給未來的
+   * embedding-based ExemplarIndex。
+   */
+  async queryExemplars(filter: { toolDomain?: string; limit: number }): Promise<Array<{
+    traceId: string;
+    toolName: string;
+    toolDomain: string;
+    executedAt: string;
+  }>> {
+    const clauses: string[] = ['success = 1'];
+    const params: unknown[] = [];
+    if (filter.toolDomain !== undefined) {
+      clauses.push('tool_domain = ?');
+      params.push(filter.toolDomain);
+    }
+    params.push(filter.limit);
+
+    const rows = this.db.prepare(`
+      SELECT trace_id, tool_name, tool_domain, executed_at
+      FROM audit_trail
+      WHERE ${clauses.join(' AND ')}
+      ORDER BY executed_at DESC
+      LIMIT ?
+    `).all(...params) as Array<{ trace_id: string; tool_name: string; tool_domain: string; executed_at: string }>;
+
+    return Promise.resolve(rows.map(row => ({
+      traceId: row.trace_id,
+      toolName: row.tool_name,
+      toolDomain: row.tool_domain,
+      executedAt: row.executed_at,
+    })));
+  }
+
   private queryUnanchoredByTraceIds(traceIds: string[]): AnchorableAuditRecord[] {
     const placeholders = traceIds.map(() => '?').join(', ');
     const rows = this.db.prepare(`
@@ -326,6 +362,7 @@ export class AuditTrail implements AuditWriter {
     traceId?: string;
     subjectId?: string;
     eventType?: CriticalEventType;
+    since?: number;
   }): Promise<CriticalEventRecord[]> {
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -338,6 +375,10 @@ export class AuditTrail implements AuditWriter {
         clauses.push(`${column} = ?`);
         params.push(value);
       }
+    }
+    if (filter.since !== undefined) {
+      clauses.push('occurred_at >= ?');
+      params.push(new Date(filter.since).toISOString());
     }
     const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
     const rows = this.db.prepare(`SELECT * FROM critical_events ${where} ORDER BY occurred_at ASC`).all(...params) as CriticalEventRow[];

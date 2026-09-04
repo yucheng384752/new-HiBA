@@ -1,0 +1,4 @@
+model_name_or_path: meta-llama/Llama-3.1-8B-Instruct
+adapter_name_or_path: ./training/hiba-planner-v1-lora-optimized
+export_dir: ./training/hiba-planner-v1-merged-optimized
+export_device: cpu

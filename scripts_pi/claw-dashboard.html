@@ -195,6 +195,8 @@
   .history-item .hi-meta { color: var(--muted); font-size: 11px; }
   .history-item .hi-del { background: none; border: 1px solid var(--red); color: var(--red); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; }
   .history-item .hi-del:hover { background: rgba(248,81,73,.1); }
+  .history-item .hi-approve { background: none; border: 1px solid var(--green); color: var(--green); border-radius: 4px; padding: 2px 8px; cursor: pointer; font-size: 11px; }
+  .history-item .hi-approve:hover { background: rgba(63,185,80,.1); }
 
   .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin .6s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
@@ -311,10 +313,11 @@
     background: radial-gradient(circle, rgba(61,141,232,0.15) 0%, transparent 70%);
     box-shadow: 0 0 18px rgba(61,141,232,0.3);
     display: flex; flex-direction: column; justify-content: center; align-items: center;
-    cursor: pointer; flex-shrink: 0; position: relative; z-index: 2;
+    cursor: grab; flex-shrink: 0; position: relative; z-index: 2;
+    transform: translate(var(--topo-x, 0px), var(--topo-y, 0px));
     transition: box-shadow .2s, transform .2s;
   }
-  .topo-hub:hover { box-shadow: 0 0 28px rgba(61,141,232,0.55); transform: scale(1.04); }
+  .topo-hub:hover { box-shadow: 0 0 28px rgba(61,141,232,0.55); transform: translate(var(--topo-x, 0px), var(--topo-y, 0px)) scale(1.04); }
   .topo-hub .hub-title { color: var(--accent); font-size: 13px; font-weight: 700; }
   .topo-hub .hub-sub   { color: var(--muted);  font-size: 10px; margin-top: 2px; }
   .topo-hub .hub-back  { color: var(--muted);  font-size: 9px;  margin-top: 4px; opacity: .7; }
@@ -327,10 +330,12 @@
     background: rgba(14,18,24,0.85); border: 1px solid var(--border);
     border-radius: 12px; padding: 11px 16px;
     width: 230px; display: flex; align-items: center; gap: 12px;
-    cursor: pointer; transition: border-color .2s, transform .15s, box-shadow .2s;
+    cursor: grab; transform: translate(var(--topo-x, 0px), var(--topo-y, 0px)); transition: border-color .2s, transform .15s, box-shadow .2s;
   }
-  .topo-node-card:hover { border-color: var(--green); transform: translateX(5px); box-shadow: 0 0 14px rgba(61,232,138,0.18); }
+  .topo-node-card:hover { border-color: var(--green); transform: translate(calc(var(--topo-x, 0px) + 5px), var(--topo-y, 0px)); box-shadow: 0 0 14px rgba(61,232,138,0.18); }
   .topo-node-card.active { border-color: var(--accent); background: rgba(61,141,232,0.08); box-shadow: 0 0 16px rgba(61,141,232,0.22); }
+  .topo-hub.dragging, .topo-node-card.dragging { cursor: grabbing; transition: none; }
+  .topo-hub.dragging:hover, .topo-node-card.dragging:hover { transform: translate(var(--topo-x, 0px), var(--topo-y, 0px)); }
 
   /* Status ring */
   .topo-node-ring { width: 36px; height: 36px; border-radius: 50%; border: 2px solid var(--green); display: flex; justify-content: center; align-items: center; background: var(--bg); flex-shrink: 0; }
@@ -376,11 +381,16 @@
   .topo-tree-row:last-child::after { display: none; }
   .topo-tree-row:hover { color: var(--text-bright); transform: translateX(3px); }
   .topo-tree-row.active { color: var(--accent); font-weight: 700; }
+  .topo-tree-row.is-child { margin: 3px 0 4px 14px; padding: 6px 8px; border: 1px solid rgba(61,141,232,.25); border-radius: 7px; background: rgba(61,141,232,.06); }
+  .topo-tree-row.is-child::before { left: -18px; top: -14px; width: 16px; height: 28px; border-top: 0; border-left: 1.5px solid rgba(61,141,232,.5); border-bottom: 1.5px solid rgba(61,141,232,.5); border-bottom-left-radius: 6px; }
+  .topo-tree-row.is-child::after { display: none; }
   .topo-tree-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 7px var(--green); }
   .topo-tree-dot.offline { background: var(--red); box-shadow: 0 0 7px var(--red); }
   .topo-tree-dot.checking { background: var(--amber); box-shadow: 0 0 7px var(--amber); animation: pulse 1s infinite; }
   .topo-tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .topo-tree-meta { color: var(--muted); font-size: 10px; margin-left: 6px; font-weight: 400; }
+  .topo-tree-row.is-child .topo-tree-meta { display: block; margin: 2px 0 0; color: #7892ad; }
+  .topo-tree-child-tag { margin-left: 5px; padding: 1px 4px; border-radius: 4px; background: rgba(61,141,232,.16); color: var(--accent); font-size: 8px; vertical-align: 1px; }
   .topo-tree-empty { color: var(--muted); font-size: 12px; padding: 10px 0 0 0; }
 
   /* Zoom controls */
@@ -677,6 +687,8 @@
       <div class="tab" data-tab="scripts" onclick="switchTab('scripts')">Script List</div>
       <div class="tab" data-tab="deploy" onclick="switchTab('deploy')">Deploy</div>
       <div class="tab" data-tab="workflow" onclick="switchTab('workflow')">Plan</div>
+      <div class="tab" data-tab="blockchain" onclick="switchTab('blockchain')">Web3 Verify</div>
+      <div class="tab" data-tab="linetopo" onclick="switchTab('linetopo')">產線拓樸</div>
       <div class="tab" data-tab="stream" onclick="switchTab('stream')">Stream</div>
       <div class="tab" data-tab="curl" onclick="switchTab('curl')">Curl</div>
     </div>
@@ -702,6 +714,39 @@
         <div class="empty-state"><div class="icon">🧩</div>任務鏈已顯示於輸入框下方</div>
       </div>
 
+      <!-- Real Web3 file evidence; deliberately does not use /api/blockchain/* mock routes. -->
+      <div class="tab-pane" id="tab-blockchain">
+        <div class="script-item" style="padding:16px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+            <strong>Blockchain File Verification</strong>
+            <span class="badge status" style="color:var(--green)">REAL MATERIAL TOOL</span>
+          </div>
+          <p style="font-size:12px;color:var(--muted);margin-bottom:12px">本機經由 <code>/api/execute</code>；遠端節點經由 <code>/api/run</code> 派送 material.protectFile / material.verifyFile。</p>
+          <label style="display:block;font-size:11px;color:var(--muted);margin-bottom:12px">執行節點
+            <select id="blockchainNode" class="wf-select" style="display:block;width:100%;margin-top:5px" onchange="resetBlockchainEvidence()">
+              <option value="local">local（Planning Server）</option>
+            </select>
+          </label>
+          <div class="attach-bar" id="attachBar_blockchainEvidence">
+            <button class="attach-btn" onclick="triggerAttachPicker('blockchainEvidence')">📎 選擇驗證檔案</button>
+            <span style="font-size:11px;color:var(--muted)">.json,.txt,.csv,.tsv,.log,.md · 上限 512KB</span>
+            <input type="file" id="attachInput_blockchainEvidence" accept=".json,.txt,.csv,.tsv,.log,.md" style="display:none"
+              onchange="onAttachSelected(this,'blockchainEvidence');resetBlockchainEvidence()">
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+            <button class="run-btn" onclick="protectBlockchainFile()">Protect</button>
+            <button class="run-btn" onclick="verifyBlockchainFile(false)">Verify</button>
+            <button class="run-btn" onclick="verifyBlockchainFile(true)">Tamper Test (1 character)</button>
+          </div>
+          <div id="blockchainEvidenceResult" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <!-- Line Topology Tab（產線物理拓樸，非左側的節點網路拓樸） -->
+      <div class="tab-pane" id="tab-linetopo">
+        <div id="linetopoContent"><div class="empty-state"><div class="icon">🔗</div>載入中…</div></div>
+      </div>
+
       <!-- Stream Tab -->
       <div class="tab-pane" id="tab-stream">
         <div id="streamContent">
@@ -722,13 +767,13 @@
 // ── Constants ──────────────────────────────────────────────────────────────
 const AGENT_ID  = 'claw-dashboard';
 const LS_KEYS   = { favorites: 'claw_favorites', shellHistory: 'claw_shell_history' };
-const TAB_NAMES = ['health', 'scripts', 'deploy', 'workflow', 'stream', 'curl'];
+const TAB_NAMES = ['health', 'scripts', 'deploy', 'workflow', 'blockchain', 'linetopo', 'stream', 'curl'];
 
 // ── State ──────────────────────────────────────────────────────────────────
 const nodes = new Map(); // nodeId → { url, status, health, scripts }
 
 function saveNodes() {
-  const arr = [...nodes.entries()].map(([id, n]) => ({ id, url: n.url }));
+  const arr = [...nodes.entries()].filter(([, n]) => !n.logical).map(([id, n]) => ({ id, url: n.url }));
   localStorage.setItem('claw_nodes', JSON.stringify(arr));
 }
 
@@ -917,6 +962,7 @@ function setView(view) {
 }
 
 function enterTopology() {
+  void loadAccountingCapabilities().catch(() => {});
   setView('topology');
   renderNodeList();
   requestAnimationFrame(drawTopoLines);
@@ -932,6 +978,7 @@ function showLanding() {
 }
 
 async function refreshAll() {
+  await loadAccountingCapabilities().catch(() => {});
   for (const id of nodes.keys()) await checkNode(id);
 }
 
@@ -946,7 +993,19 @@ function renderNodeList() {
   void canvas.offsetWidth;
   canvas.classList.add('topo-animating');
 
-  const entries = [...nodes.entries()];
+  const depthOf = (id, seen = new Set()) => {
+    if (seen.has(id)) return 0;
+    seen.add(id);
+    const parentId = nodes.get(id)?.parentNodeId;
+    return parentId && nodes.has(parentId) ? 1 + depthOf(parentId, seen) : 0;
+  };
+  const pathOf = (id, seen = new Set()) => {
+    if (seen.has(id)) return id;
+    seen.add(id);
+    const parentId = nodes.get(id)?.parentNodeId;
+    return parentId && nodes.has(parentId) ? `${pathOf(parentId, seen)}\0${id}` : id;
+  };
+  const entries = [...nodes.entries()].sort(([a], [b]) => pathOf(a).localeCompare(pathOf(b)));
   const sc = s => s === 'online' ? 'online' : s === 'offline' ? 'offline' : 'checking';
   const esc = v => String(v ?? '').replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
 
@@ -962,7 +1021,8 @@ function renderNodeList() {
         const sub    = urlObj ? `${urlObj.hostname}:${urlObj.port || '80'}` : node.url;
         const isActive = id === activeNodeId;
         const animStyle = node.status === 'checking' ? ' style="animation:pulse 1s infinite"' : '';
-        return `<div class="topo-node-card${isActive ? ' active' : ''}" onclick="selectNode('${id}')">
+        const position = topoCardPositions.get(id) ?? { x: 0, y: 0 };
+        return `<div class="topo-node-card${isActive ? ' active' : ''}" data-node-id="${esc(id)}" data-parent-id="${esc(node.parentNodeId || '')}" style="margin-left:${depthOf(id) * 88}px;--topo-x:${position.x}px;--topo-y:${position.y}px" onclick="selectNode('${id}')">
           <div class="topo-node-ring ${status}">
             <div class="topo-node-dot ${status}"${animStyle}></div>
           </div>
@@ -985,22 +1045,26 @@ function renderNodeList() {
         <div class="topo-tree-rows">
         ${entries.map(([id, node]) => {
           const status = sc(node.status);
+          const depth = depthOf(id);
+          const isChild = depth > 0;
           const alias = nodeAliases.get(id);
           const urlObj = parseUrl(node.url);
           const sub = urlObj ? `${urlObj.hostname}:${urlObj.port || '80'}` : node.url;
           const isActive = id === activeNodeId;
           const label = alias ? `${id} / ${alias}` : id;
-          return `<div class="topo-tree-row${isActive ? ' active' : ''}" onclick="selectNode('${id}')" title="${esc(node.url)}">
+          const meta = isChild ? `via ${node.parentNodeId} · ${node.scripts?.length || 0} scripts` : sub;
+          return `<div class="topo-tree-row${isActive ? ' active' : ''}${isChild ? ' is-child' : ''}" style="margin-left:${depth * 14}px" onclick="selectNode('${id}')" title="${esc(node.url)}">
             <span class="topo-tree-dot ${status}"></span>
-            <span class="topo-tree-label">${esc(label)}<span class="topo-tree-meta">${esc(sub)}</span></span>
+            <span class="topo-tree-label">${esc(label)}${isChild ? `<span class="topo-tree-child-tag">L${depth + 2}</span>` : ''}<span class="topo-tree-meta">${esc(meta)}</span></span>
             <span>${isActive ? '*' : ''}</span>
           </div>`;
         }).join('')}
         </div>
       </div>`;
 
+  const hubPosition = topoCardPositions.get('__hub__') ?? { x: 0, y: 0 };
   canvas.innerHTML = `
-    <div class="topo-hub" id="topoHub" ${hubClickAttr}>
+    <div class="topo-hub" id="topoHub" style="--topo-x:${hubPosition.x}px;--topo-y:${hubPosition.y}px" ${hubClickAttr}>
       <span class="hub-title">CLAW</span>
       <span class="hub-sub">dashboard</span>
       ${hubBack}
@@ -1026,16 +1090,24 @@ function drawTopoLines() {
   const isH = canvas.dataset.layout === 'h';
   const cr  = canvas.getBoundingClientRect();
   const hr  = hub.getBoundingClientRect();
+  const scale = topoTx.s;
+  const x = value => (value - cr.left) / scale;
+  const y = value => (value - cr.top) / scale;
 
   // Hub connection point
-  const hx = isH ? hr.right  - cr.left : hr.left + hr.width  / 2 - cr.left;
-  const hy = isH ? hr.top    + hr.height / 2 - cr.top : hr.bottom - cr.top;
+  const hx = isH ? x(hr.right) : x(hr.left + hr.width / 2);
+  const hy = isH ? y(hr.top + hr.height / 2) : y(hr.bottom);
 
   const lines = [];
+  const cardsById = new Map([...cards].map(card => [card.dataset.nodeId, card]));
   cards.forEach(card => {
     const r = card.getBoundingClientRect();
-    const cx = isH ? r.left - cr.left : hr.left + hr.width / 2 - cr.left;
-    const cy = isH ? r.top  + r.height / 2 - cr.top : r.top - cr.top;
+    const parent = cardsById.get(card.dataset.parentId);
+    const source = parent?.getBoundingClientRect() ?? hr;
+    const sx = isH ? x(source.right) : x(source.left + source.width / 2);
+    const sy = isH ? y(source.top + source.height / 2) : y(source.bottom);
+    const cx = isH ? x(r.left) : x(r.left + r.width / 2);
+    const cy = isH ? y(r.top + r.height / 2) : y(r.top);
 
     const isActive = card.classList.contains('active');
     const dot = card.querySelector('.topo-node-dot');
@@ -1047,11 +1119,11 @@ function drawTopoLines() {
 
     let path;
     if (isH) {
-      const cpX = (hx + cx) / 2;
-      path = `M${hx},${hy} C${cpX},${hy} ${cpX},${cy} ${cx},${cy}`;
+      const cpX = (sx + cx) / 2;
+      path = `M${sx},${sy} C${cpX},${sy} ${cpX},${cy} ${cx},${cy}`;
     } else {
-      const cpY = (hy + cy) / 2;
-      path = `M${hx},${hy} C${hx},${cpY} ${cx},${cpY} ${cx},${cy}`;
+      const cpY = (sy + cy) / 2;
+      path = `M${sx},${sy} C${sx},${cpY} ${cx},${cpY} ${cx},${cy}`;
     }
     lines.push(`<path d="${path}" fill="none" stroke="${col}" stroke-width="${sw}" ${dash}/>`);
   });
@@ -1078,6 +1150,9 @@ function renderTopologySidebar(svg) { /* no-op */ void svg; }
 // ── Topology Zoom / Pan ───────────────────────────────────────────────────────
 let topoTx = { x: 0, y: 0, s: 1 };
 let topoDragState = { on: false, sx: 0, sy: 0, tx: 0, ty: 0 };
+const topoCardPositions = new Map();
+let topoCardDrag = null;
+let topoSuppressClick = false;
 
 function applyTopoTx() {
   const c = document.getElementById('topoCanvas');
@@ -1091,6 +1166,41 @@ function topoZoomReset() { topoTx = { x: 0, y: 0, s: 1 }; applyTopoTx(); }
 function initTopoInteraction() {
   const vp = document.getElementById('topoViewport');
   if (!vp) return;
+
+  // Drag individual topology cards; positions survive status-driven re-renders.
+  vp.addEventListener('pointerdown', e => {
+    const card = e.target.closest('.topo-node-card, .topo-hub');
+    if (!card || e.target.closest('.topo-node-actions, button, input, select')) return;
+    const key = card.id === 'topoHub' ? '__hub__' : card.dataset.nodeId;
+    const position = topoCardPositions.get(key) ?? { x: 0, y: 0 };
+    topoCardDrag = { card, key, pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, x: position.x, y: position.y, moved: false };
+    card.setPointerCapture?.(e.pointerId);
+    card.classList.add('dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('pointermove', e => {
+    if (!topoCardDrag || e.pointerId !== topoCardDrag.pointerId) return;
+    const dx = (e.clientX - topoCardDrag.startX) / topoTx.s;
+    const dy = (e.clientY - topoCardDrag.startY) / topoTx.s;
+    topoCardDrag.moved ||= Math.hypot(dx, dy) > 3;
+    const position = { x: topoCardDrag.x + dx, y: topoCardDrag.y + dy };
+    topoCardPositions.set(topoCardDrag.key, position);
+    topoCardDrag.card.style.setProperty('--topo-x', `${position.x}px`);
+    topoCardDrag.card.style.setProperty('--topo-y', `${position.y}px`);
+    drawTopoLines();
+  });
+  window.addEventListener('pointerup', e => {
+    if (!topoCardDrag || e.pointerId !== topoCardDrag.pointerId) return;
+    topoCardDrag.card.classList.remove('dragging');
+    topoSuppressClick = topoCardDrag.moved;
+    topoCardDrag = null;
+  });
+  vp.addEventListener('click', e => {
+    if (!topoSuppressClick) return;
+    topoSuppressClick = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, true);
 
   // Mouse-wheel zoom (centred on cursor)
   vp.addEventListener('wheel', e => {
@@ -1139,7 +1249,7 @@ function initTopoInteraction() {
         x: (e.touches[0].clientX + e.touches[1].clientX) / 2,
         y: (e.touches[0].clientY + e.touches[1].clientY) / 2
       };
-    } else if (e.touches.length === 1) {
+    } else if (e.touches.length === 1 && !e.target.closest('.topo-node-card, .topo-hub')) {
       topoDragState = { on: true, sx: e.touches[0].clientX, sy: e.touches[0].clientY, tx: topoTx.x, ty: topoTx.y };
     }
   }, { passive: true });
@@ -1206,6 +1316,8 @@ function switchTab(tab) {
   if (tab === 'deploy') renderDeploy();
   if (tab === 'curl') renderCurl();
   if (tab === 'workflow') renderWorkflow();
+  if (tab === 'blockchain') renderBlockchainNodeOptions();
+  if (tab === 'linetopo') renderLineTopology();
   if (activeNodeId && tab === 'stream') renderStream();
 }
 
@@ -1536,7 +1648,11 @@ async function runScriptInline(nodeId, scriptName) {
       body: JSON.stringify({ scriptName, params }),
       timeout: 35000,
     });
-    const data = await res.json();
+    const text = await res.text();
+    let data;
+    try { data = text ? JSON.parse(text) : {}; }
+    catch { throw new Error(`Node 回傳非 JSON（HTTP ${res.status}）：${text.slice(0, 120)}`); }
+    if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     renderResult(resultEl, data, Date.now() - t0, traceId, s.renderHint);
   } catch (e) {
     if (resultEl) resultEl.innerHTML = `<div class="result-box"><div style="color:var(--red)">${e.message}</div></div>`;
@@ -2134,6 +2250,7 @@ function getAttachmentData(uid) {
 
 function clearAttachment(uid) {
   attachments.delete(uid);
+  if (uid === 'blockchainEvidence') resetBlockchainEvidence();
   const bar = document.getElementById(`attachBar_${uid}`);
   if (bar) bar.innerHTML = `
     <button class="attach-btn" onclick="triggerAttachPicker('${uid}')">📎 附加文件</button>
@@ -2170,6 +2287,136 @@ function onAttachSelected(input, uid) {
   reader.readAsText(file, 'utf-8');
 }
 
+let blockchainFilePath = null;
+let blockchainProtection = null;
+
+function resetBlockchainEvidence() {
+  blockchainFilePath = null;
+  blockchainProtection = null;
+  const el = document.getElementById('blockchainEvidenceResult');
+  if (el) el.innerHTML = '';
+}
+
+async function executeMaterial(toolName, input) {
+  const res = await safeFetch(`${workflowPlanningUrl.replace(/\/+$/, '')}/api/execute`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Trace-Id': genTraceId(), 'X-Agent-Id': AGENT_ID },
+    body: JSON.stringify({ toolName, input }),
+    timeout: 35000,
+  });
+  const result = await res.json();
+  if (!res.ok || !result.success) throw new Error(result.error || `HTTP ${res.status}`);
+  return result.output;
+}
+
+function blockchainTargetNode() {
+  return document.getElementById('blockchainNode')?.value || 'local';
+}
+
+function renderBlockchainNodeOptions() {
+  const select = document.getElementById('blockchainNode');
+  if (!select) return;
+  const selected = select.value || 'local';
+  const options = accountingCapabilities
+    .filter(node => node.status === 'online'
+      && ['material.readAttachment', 'material.protectFile', 'material.verifyFile']
+        .every(toolName => node.resources.some(resource => resource.name === toolName)))
+    .map(node => `<option value="${escapeHtml(node.nodeId)}">${escapeHtml(nodeAliases.get(node.nodeId) || node.nodeId)}</option>`)
+    .join('');
+  select.innerHTML = `<option value="local">local（Planning Server）</option>${options}`;
+  if ([...select.options].some(option => option.value === selected)) select.value = selected;
+}
+
+async function executeRemoteMaterial(toolName, input, content) {
+  const target = blockchainTargetNode();
+  const attachment = getAttachmentData('blockchainEvidence');
+  if (!attachment) throw new Error('請先選擇檔案');
+  const traceId = genTraceId();
+  const plan = {
+    protocolVersion: '1.0',
+    steps: [
+      { stepId: 'S1', toolName: 'material.readAttachment', nodeId: target, version: '1.0.0',
+        input: { _attachment: { name: attachment.name, content }, maxRows: 20 }, dependsOn: [] },
+      { stepId: 'S2', toolName, nodeId: target, version: '1.0.0',
+        input: { ...input, filePath: '$steps.S1.output.filePath' }, dependsOn: ['S1'] },
+    ],
+    supervisorPolicy: 'fail-fast',
+  };
+  const res = await safeFetch(`${workflowPlanningUrl.replace(/\/+$/, '')}/api/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Trace-Id': traceId, 'X-Agent-Id': AGENT_ID },
+    body: JSON.stringify({ plan }),
+    timeout: 120_000,
+  });
+  const run = await res.json();
+  const step = run.steps?.find(item => item.stepId === 'S2');
+  if (!res.ok || !step?.result?.success) throw new Error(step?.result?.error || run.error || `HTTP ${res.status}`);
+  if (step.dispatched !== 'remote' || step.nodeId !== target) throw new Error(`Remote dispatch mismatch: expected ${target}`);
+  return step.result.output;
+}
+
+async function landBlockchainAttachment(content) {
+  const attachment = getAttachmentData('blockchainEvidence');
+  if (!attachment) throw new Error('請先選擇檔案');
+  return executeMaterial('material.readAttachment', {
+    _attachment: { name: attachment.name, content },
+    maxRows: 20,
+  });
+}
+
+function renderBlockchainEvidence(title, output) {
+  const fields = ['protectionId', 'isValid', 'verdict', 'expectedHash', 'actualHash', 'fileHash', 'txHash', 'blockHash', 'chainId', 'contractAddress', 'receiptStatus'];
+  const rows = fields.filter(key => output[key] !== undefined).map(key =>
+    `<tr><th>${escapeHtml(key)}</th><td style="word-break:break-all">${escapeHtml(String(output[key]))}</td></tr>`
+  ).join('');
+  document.getElementById('blockchainEvidenceResult').innerHTML = `
+    <div class="result-box ${output.isValid === false ? 'err' : 'ok'}" style="margin-top:12px">
+      <div class="result-meta"><strong>${escapeHtml(title)}</strong><span style="margin-left:auto">real Web3 material tool</span></div>
+      <table><tbody>${rows}</tbody></table>
+    </div>`;
+}
+
+async function protectBlockchainFile() {
+  try {
+    const attachment = getAttachmentData('blockchainEvidence');
+    if (!attachment) throw new Error('請先選擇檔案');
+    if (blockchainTargetNode() === 'local') {
+      const landed = await landBlockchainAttachment(attachment.content);
+      blockchainFilePath = landed.filePath;
+      blockchainProtection = await executeMaterial('material.protectFile', { filePath: blockchainFilePath, keepFile: true });
+    } else {
+      blockchainProtection = await executeRemoteMaterial('material.protectFile', { keepFile: true }, attachment.content);
+    }
+    renderBlockchainEvidence('Protect 成功', blockchainProtection);
+  } catch (error) {
+    toast(`Protect 失敗：${error.message}`, 'var(--red)');
+  }
+}
+
+async function verifyBlockchainFile(tamper) {
+  try {
+    const attachment = getAttachmentData('blockchainEvidence');
+    if (!attachment) throw new Error('請先選擇檔案');
+    if (!blockchainProtection) throw new Error('請先完成 Protect');
+    let content = attachment.content;
+    if (tamper) {
+      if (!attachment.content.length) throw new Error('空檔案無法執行單字元篡改測試');
+      const first = attachment.content[0] === 'X' ? 'Y' : 'X';
+      content = first + attachment.content.slice(1);
+    }
+    let output;
+    if (blockchainTargetNode() === 'local') {
+      const filePath = tamper ? (await landBlockchainAttachment(content)).filePath : blockchainFilePath;
+      output = await executeMaterial('material.verifyFile', { filePath, protectionId: blockchainProtection.protectionId });
+    } else {
+      output = await executeRemoteMaterial('material.verifyFile', { protectionId: blockchainProtection.protectionId }, content);
+    }
+    renderBlockchainEvidence(tamper ? 'Tamper Test 結果' : 'Verify 結果', output);
+  } catch (error) {
+    toast(`Verify 失敗：${error.message}`, 'var(--red)');
+  }
+}
+
 // ── Workflow Tab ──────────────────────────────────────────────────────────────
 
 function renderWorkflow() {
@@ -2195,6 +2442,7 @@ async function generatePlan() {
   const injectCtx = document.getElementById('injectCtxToggle')?.checked !== false;
   const ctxBlock  = injectCtx ? buildPlanContext() : '';
   const task      = ctxBlock ? `${ctxBlock}\n\n使用者任務：${rawTask}` : rawTask;
+  const attachment = getAttachmentData('blockchainEvidence');
 
   const badge = document.getElementById('ctxBadge');
   if (badge) {
@@ -2215,7 +2463,7 @@ async function generatePlan() {
     const res = await safeFetch(planUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ task }),
+      body: JSON.stringify({ task, ...(attachment ? { _attachment: attachment } : {}) }),
       timeout: 120_000,
     });
     if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0,120)}`); }
@@ -2223,7 +2471,8 @@ async function generatePlan() {
     activeWorkflowId = workflowPlan.workflowId || null;
     if (activeWorkflowId) localStorage.setItem('wf_active_id', activeWorkflowId);
     renderPlan();
-    toast('Plan generated', 'var(--green)');
+    toast(workflowPlan.attachmentUnused ? 'Plan generated（附件未使用）' : 'Plan generated',
+      workflowPlan.attachmentUnused ? 'var(--amber)' : 'var(--green)');
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     workflowPlan = {
@@ -2969,7 +3218,28 @@ async function loadAccountingCapabilities() {
     status: node.status === 'online' ? 'online' : 'offline',
     canInstall: node.canInstall === true,
     resources: Array.isArray(node.resources) ? node.resources : [],
+    agentUrl: typeof node.agentUrl === 'string' ? node.agentUrl : '',
+    parentNodeId: typeof node.parentNodeId === 'string' ? node.parentNodeId : '',
+    routeType: node.routeType || '',
   })).filter(node => node.nodeId);
+  const logicalIds = new Set(accountingCapabilities.filter(node => node.parentNodeId).map(node => node.nodeId));
+  for (const [nodeId, node] of nodes) {
+    if (node.logical && !logicalIds.has(nodeId)) nodes.delete(nodeId);
+  }
+  accountingCapabilities.filter(node => node.parentNodeId && node.agentUrl).forEach(node => {
+    const existing = nodes.get(node.nodeId) || {};
+    nodes.set(node.nodeId, {
+      ...existing,
+      url: node.agentUrl,
+      status: node.status,
+      health: existing.health || { nodeId: node.nodeId, status: node.status, parentNodeId: node.parentNodeId, routeType: node.routeType },
+      scripts: node.resources,
+      parentNodeId: node.parentNodeId,
+      logical: true,
+    });
+  });
+  renderNodeList();
+  renderBlockchainNodeOptions();
   return accountingCapabilities;
 }
 
@@ -2996,6 +3266,176 @@ function buildPlanContext() {
     }
   }
   return lines.join('\n');
+}
+
+// ── Line Topology Tab（產線物理拓樸：上下游/站點順序，非上面「節點網路拓樸」）──
+// 規格：實作規格/plan()_LLM生成品質改善與輕量RAG檢索設計.md §四，2026-09
+// 改版為每場域一份 JSON 檔案（見 hiba-core/facilities/README.md），取代原本
+// 的 SQLite 邊資料表設計。API：Accounting Server 的 /api/facilities*
+// （workflowAccountingUrl，不是 workflowPlanningUrl），跟左側節點拓樸完全
+// 獨立、也不是同一個服務。
+const TOPOLOGY_RELATIONS = ['upstream_of', 'downstream_of', 'backup_for', 'same_line'];
+let lineTopologyState = { facilities: [] };
+let selectedTopoFacilityId = null;
+
+function topoBaseUrl() {
+  return workflowAccountingUrl.replace(/\/+$/, '');
+}
+
+async function loadFacilities() {
+  const base = topoBaseUrl();
+  const indexRes = await safeFetch(`${base}/api/facilities`, { timeout: 8000 });
+  if (!indexRes.ok) throw new Error(`HTTP ${indexRes.status}`);
+  const index = await indexRes.json();
+  const facilities = await Promise.all(index.map(async entry => {
+    const res = await safeFetch(`${base}/api/facilities/${encodeURIComponent(entry.facilityId)}`, { timeout: 8000 });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    return res.json();
+  }));
+  return { facilities };
+}
+
+function topoStationOptions(facility) {
+  return facility.stations.map(s => `<option value="${escapeHtml(s.stationId)}">${escapeHtml(s.name)}</option>`).join('');
+}
+
+function onTopoFacilityChange() {
+  selectedTopoFacilityId = document.getElementById('topoFacilityId').value;
+  const facility = lineTopologyState.facilities.find(f => f.facilityId === selectedTopoFacilityId);
+  const stationOptions = facility ? topoStationOptions(facility) : '';
+  document.getElementById('topoFromStation').innerHTML = stationOptions;
+  document.getElementById('topoToStation').innerHTML = stationOptions;
+}
+
+function topoEdgeRow(edgeItem, actionHtml) {
+  const sourceLabel = edgeItem.source === 'audit_trail_inference' ? 'AuditTrail 自動偵測' : '人工維護';
+  const lineLabel = edgeItem.lineId ? ` · 產線 ${escapeHtml(edgeItem.lineId)}` : '';
+  return `
+    <div class="history-item">
+      <div>
+        <div class="hi-name">${escapeHtml(edgeItem.fromStationId)} --${escapeHtml(edgeItem.relation)}--> ${escapeHtml(edgeItem.toStationId)}</div>
+        <div class="hi-meta">${sourceLabel}${lineLabel}</div>
+      </div>
+      ${actionHtml}
+    </div>`;
+}
+
+function facilityBlockHtml(facility) {
+  const stationsHtml = facility.stations
+    .map(s => `<div class="hi-meta">${escapeHtml(s.stationId)} · ${escapeHtml(s.name)}${s.nodeId ? ` · node: ${escapeHtml(s.nodeId)}` : ''}</div>`)
+    .join('');
+  const withIndex = facility.edges.map((e, i) => ({ e, i }));
+  const suggested = withIndex.filter(x => x.e.status === 'suggested');
+  const approved = withIndex.filter(x => x.e.status === 'approved');
+
+  const suggestedHtml = suggested.length
+    ? suggested.map(({ e, i }) => topoEdgeRow(
+        e, `<button class="hi-approve" onclick="approveTopologyEdge('${escapeHtml(facility.facilityId)}',${i})">核准</button>`,
+      )).join('')
+    : '<div class="empty-state" style="padding:12px 0"><div class="icon">✓</div>沒有待審核的拓樸邊</div>';
+  const approvedHtml = approved.length
+    ? approved.map(({ e }) => topoEdgeRow(e, '')).join('')
+    : '<div class="empty-state" style="padding:12px 0"><div class="icon">📭</div>尚未設定任何拓樸邊</div>';
+
+  return `
+    <div class="deploy-history">
+      <h3>${escapeHtml(facility.name)} <span class="hi-meta">(${escapeHtml(facility.facilityId)})</span></h3>
+      <div class="hi-meta">${escapeHtml(facility.processDescription)}</div>
+      <div style="margin:8px 0">${stationsHtml}</div>
+      <h4>待審核（AuditTrail 自動偵測，需人工核准才會出現在 plan() 檢索結果）</h4>
+      ${suggestedHtml}
+      <h4>已核准</h4>
+      ${approvedHtml}
+    </div>`;
+}
+
+async function renderLineTopology() {
+  const el = document.getElementById('linetopoContent');
+  el.innerHTML = '<div class="empty-state"><div class="icon">🔗</div>載入中…</div>';
+
+  try {
+    lineTopologyState = await loadFacilities();
+  } catch (e) {
+    el.innerHTML = `<div class="deploy-form"><div style="color:var(--red)">載入失敗：${escapeHtml(e.message)}（確認 Accounting Server 是否已啟動並設定 Accounting URL）</div></div>`;
+    return;
+  }
+
+  if (lineTopologyState.facilities.length === 0) {
+    el.innerHTML = '<div class="empty-state"><div class="icon">📭</div>尚未設定任何場域（見 hiba-core/facilities/README.md）</div>';
+    return;
+  }
+
+  if (!lineTopologyState.facilities.some(f => f.facilityId === selectedTopoFacilityId)) {
+    selectedTopoFacilityId = lineTopologyState.facilities[0].facilityId;
+  }
+  const selectedFacility = lineTopologyState.facilities.find(f => f.facilityId === selectedTopoFacilityId);
+
+  const facilityOptions = lineTopologyState.facilities
+    .map(f => `<option value="${escapeHtml(f.facilityId)}"${f.facilityId === selectedTopoFacilityId ? ' selected' : ''}>${escapeHtml(f.name)}</option>`)
+    .join('');
+  const relationOptions = TOPOLOGY_RELATIONS.map(r => `<option value="${r}">${r}</option>`).join('');
+  const stationOptions = selectedFacility ? topoStationOptions(selectedFacility) : '';
+  const facilitiesHtml = lineTopologyState.facilities.map(facilityBlockHtml).join('');
+
+  el.innerHTML = `
+    <div class="deploy-form">
+      <h3>新增拓樸邊（人工維護，新增後立即生效）</h3>
+      <div class="deploy-meta">
+        <div><label>場域</label><select id="topoFacilityId" onchange="onTopoFacilityChange()">${facilityOptions}</select></div>
+        <div><label>Relation</label><select id="topoRelation">${relationOptions}</select></div>
+        <div><label>From Station</label><select id="topoFromStation">${stationOptions}</select></div>
+        <div><label>To Station</label><select id="topoToStation">${stationOptions}</select></div>
+        <div><label>產線 ID（選填）</label><input id="topoLineId" placeholder="line-A"></div>
+      </div>
+      <button class="deploy-btn" onclick="addTopologyEdge()">新增</button>
+    </div>
+    ${facilitiesHtml}`;
+}
+
+async function addTopologyEdge() {
+  const facilityId    = document.getElementById('topoFacilityId').value;
+  const fromStationId = document.getElementById('topoFromStation').value;
+  const relation       = document.getElementById('topoRelation').value;
+  const toStationId    = document.getElementById('topoToStation').value;
+  const lineId          = document.getElementById('topoLineId').value.trim();
+  if (!facilityId) { toast('請先選擇場域', 'var(--amber)'); return; }
+  if (!fromStationId || !toStationId) { toast('From/To Station 必填', 'var(--amber)'); return; }
+
+  try {
+    const res = await safeFetch(`${topoBaseUrl()}/api/facilities/${encodeURIComponent(facilityId)}/edges`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fromStationId, relation, toStationId, ...(lineId ? { lineId } : {}) }),
+      timeout: 8000,
+    });
+    if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0, 120)}`); }
+    toast('✓ 拓樸邊已新增', 'var(--green)');
+    renderLineTopology();
+  } catch (e) {
+    toast(`新增失敗：${e.message}`, 'var(--red)');
+  }
+}
+
+async function approveTopologyEdge(facilityId, index) {
+  const facility = lineTopologyState.facilities.find(f => f.facilityId === facilityId);
+  const edgeItem = facility?.edges[index];
+  if (!edgeItem) return;
+
+  try {
+    const res = await safeFetch(`${topoBaseUrl()}/api/facilities/${encodeURIComponent(facilityId)}/edges/approve`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-User-Id': AGENT_ID },
+      body: JSON.stringify({
+        fromStationId: edgeItem.fromStationId, relation: edgeItem.relation, toStationId: edgeItem.toStationId,
+      }),
+      timeout: 8000,
+    });
+    if (!res.ok) { const t = await res.text(); throw new Error(`HTTP ${res.status}: ${t.slice(0, 120)}`); }
+    toast('✓ 已核准', 'var(--green)');
+    renderLineTopology();
+  } catch (e) {
+    toast(`核准失敗：${e.message}`, 'var(--red)');
+  }
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────────────

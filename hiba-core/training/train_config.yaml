@@ -22,7 +22,7 @@ preprocessing_num_workers: 1
 output_dir: ./training/hiba-planner-v1-lora
 logging_dir: ./training/logs-v1
 logging_steps: 10
-save_steps: 20
+save_steps: 10
 plot_loss: true
 overwrite_output_dir: false
 

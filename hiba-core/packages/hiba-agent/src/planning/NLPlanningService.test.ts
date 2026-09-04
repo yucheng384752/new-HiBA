@@ -1,14 +1,18 @@
-import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import {
+  inferDomainsFromIntent,
   NLPlanningService,
+  resolveNodeRouting,
+  usesOnlyWeakDomains,
   type LLMClient,
   type AccountingClient,
   type NodeResourceMap,
 } from './NLPlanningService';
 import { z } from 'zod';
-import { defineTool } from '../core/defineTool';
+import { defineTool, type RegisteredTool } from '../core/defineTool';
+import type { HiBAToolbox } from '../core/HiBAToolbox';
 import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
-import type { NodeDescriptor, ToolContext } from '../types/hiba.types';
+import type { NodeDescriptor, PlanStep, ToolContext, ToolResult } from '../types/hiba.types';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -48,6 +52,16 @@ const protectFileTool = defineTool({
   handler: async () => ({ ok: true }),
 });
 
+const alertTool: RegisteredTool = { ...protectFileTool, name: 'man.sendAlert' };
+const temperatureTool: RegisteredTool = { ...protectFileTool, name: 'env.readTemperature' };
+
+const retrievalCatalog: RegisteredTool[] = [
+  protectFileTool,
+  { ...protectFileTool, name: 'material.verifyFile' },
+  { ...protectFileTool, name: 'material.readFile' },
+  { ...protectFileTool, name: 'material.writeFile' },
+];
+
 const validPlanJson = {
   steps: [
     {
@@ -72,16 +86,76 @@ function makeAccounting(resources: NodeResourceMap = mockResources): jest.Mocked
   const nodes = Object.entries(resources).map(([nodeId, nodeResources]) => ({
     ...mockNodes[0]!, nodeId, agentUrl: `http://${nodeId}`, resources: nodeResources,
   }));
+  return makeAccountingWithNodes(resources, nodes);
+}
+
+// Like makeAccounting(), but lets a test set node status/canInstall explicitly
+// instead of always defaulting to online — needed to exercise
+// resolveNodeRouting's offline/no-capable-node/canInstall branches.
+function makeAccountingWithNodes(resources: NodeResourceMap, nodes: NodeDescriptor[]): jest.Mocked<AccountingClient> {
   return {
     listNodeResources: jest.fn<AccountingClient['listNodeResources']>().mockResolvedValue(resources),
     getNodeResources:  jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
     listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(nodes),
+    listFacilitiesForNodes: jest.fn<AccountingClient['listFacilitiesForNodes']>().mockResolvedValue([]),
+    getFacility: jest.fn<AccountingClient['getFacility']>().mockRejectedValue(new Error('not used in this test')),
+    suggestFacilityEdge: jest.fn<AccountingClient['suggestFacilityEdge']>().mockRejectedValue(new Error('not used in this test')),
+  };
+}
+
+function makeToolbox(tools: RegisteredTool[]): Pick<HiBAToolbox, 'list' | 'execute'> {
+  return {
+    list: () => tools,
+    execute: async <TOutput = unknown>(): Promise<ToolResult<TOutput>> => ({
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: { tools: tools.map(tool => ({ name: tool.name, score: 1 })) } as TOutput,
+      auditHash: 'hash', durationMs: 1, executedAt: '2026-01-01T00:00:00.000Z',
+    }),
   };
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('NLPlanningService', () => {
+  let warn: jest.SpiedFunction<typeof console.warn>;
+
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
+  afterEach(() => { jest.restoreAllMocks(); });
+
+  it.each([
+    ['請保護這個檔案', 'material'],
+    ['查詢機台狀態', 'machine'],
+    ['確認操作員技能', 'man'],
+    ['取得最新 SOP', 'method'],
+    ['讀取感測器溫度', 'env'],
+    ['測量節點 RTT', 'orchestrator'],
+  ])('infers %s as the %s domain', (task, domain) => {
+    expect(inferDomainsFromIntent(task)).toContain(domain);
+  });
+
+  it('returns every domain matched by a mixed intent', () => {
+    expect(inferDomainsFromIntent('讀取附件後依照 SOP 處理')).toEqual(['material', 'method']);
+  });
+
+  it('returns undefined when the intent has no known domain keyword', () => {
+    expect(inferDomainsFromIntent('請協助處理這件事情')).toBeUndefined();
+  });
+
+  it.each<[PlanStep[], string, boolean]>([
+    [[{ ...validPlanJson.steps[0]!, toolName: 'man.sendAlert' }], '設備過熱需要通知維修人員', true],
+    [[{ ...validPlanJson.steps[0]!, toolName: 'man.sendAlert' }], '通知維修人員', false],
+    [[{ ...validPlanJson.steps[0]!, toolName: 'orchestrator.deploy' }], '更新節點', false],
+    [[{ ...validPlanJson.steps[0]!, toolName: 'man.sendAlert' }], '請協助處理這件事情', false],
+    [[], '設備過熱需要通知維修人員', false],
+    [[
+      { ...validPlanJson.steps[0]!, toolName: 'man.sendAlert' },
+      { ...validPlanJson.steps[0]!, stepId: 'S2', toolName: 'machine.queryStatus' },
+    ], '設備過熱需要通知維修人員', false],
+  ])('detects weak-only plans only when the task also implies another domain', (steps, task, expected) => {
+    expect(usesOnlyWeakDomains(steps, task)).toBe(expected);
+  });
+
   it('returns a valid ExecutionPlan when LLM produces correct JSON', async () => {
     const llm        = makeLLM(validPlanJson);
     const accounting = makeAccounting();
@@ -110,7 +184,7 @@ describe('NLPlanningService', () => {
   it('includes complete ToolSpec in LLM payload when toolbox is provided', async () => {
     const llm = makeLLM(validPlanJson);
     const svc = new NLPlanningService(llm, makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     await svc.plan('task', ctx);
@@ -127,13 +201,93 @@ describe('NLPlanningService', () => {
     );
   });
 
+  it('uses retrieveContext tool matches when at least three registered tools are returned', async () => {
+    const llm = makeLLM(validPlanJson);
+    const execute = jest.fn<() => Promise<unknown>>().mockResolvedValue({
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: { tools: retrievalCatalog.slice(0, 3).map(tool => ({ name: tool.name, score: 1 })) },
+      auditHash: 'hash', durationMs: 1, executedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => retrievalCatalog, execute: execute as unknown as HiBAToolbox['execute'] },
+    });
+
+    await svc.plan('protect a file', ctx);
+
+    expect(execute).toHaveBeenCalledWith(
+      'orchestrator.retrieveContext',
+      { intent: 'protect a file', domains: ['material'] },
+      ctx,
+    );
+    expect(llm.complete.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(
+      retrievalCatalog.slice(0, 3).map(tool => tool.name),
+    );
+  });
+
+  it('omits domains from retrieveContext input when none can be inferred', async () => {
+    const execute = jest.fn<() => Promise<unknown>>().mockResolvedValue({
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: { tools: retrievalCatalog.map(tool => ({ name: tool.name, score: 1 })) },
+      auditHash: 'hash', durationMs: 1, executedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const svc = new NLPlanningService(makeLLM(validPlanJson), makeAccounting(), {
+      toolbox: { list: () => retrievalCatalog, execute: execute as unknown as HiBAToolbox['execute'] },
+    });
+
+    await svc.plan('請協助處理這件事情', ctx);
+
+    expect(execute).toHaveBeenCalledWith(
+      'orchestrator.retrieveContext',
+      { intent: '請協助處理這件事情' },
+      ctx,
+    );
+  });
+
+  it('falls back to the full tool catalog when retrieveContext returns fewer than three matches', async () => {
+    const llm = makeLLM(validPlanJson);
+    const execute = jest.fn<() => Promise<unknown>>().mockResolvedValue({
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: { tools: [{ name: protectFileTool.name, score: 1 }] },
+      auditHash: 'hash', durationMs: 1, executedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => retrievalCatalog, execute: execute as unknown as HiBAToolbox['execute'] },
+    });
+
+    await svc.plan('protect a file', ctx);
+
+    expect(llm.complete.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(
+      retrievalCatalog.map(tool => tool.name),
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('returned 1 matching tools'));
+  });
+
+  it('falls back to the full tool catalog when retrieveContext throws', async () => {
+    const llm = makeLLM(validPlanJson);
+    const execute = jest.fn<() => Promise<unknown>>().mockRejectedValue(new Error('context timeout'));
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => retrievalCatalog, execute: execute as unknown as HiBAToolbox['execute'] },
+    });
+
+    await expect(svc.plan('protect a file', ctx)).resolves.toEqual(
+      expect.objectContaining({ steps: validPlanJson.steps }),
+    );
+    expect(llm.complete.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(
+      retrievalCatalog.map(tool => tool.name),
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('context timeout'));
+  });
+
   it('returns structured missingInputs when deterministic validation rejects a plan', async () => {
     const invalidInputPlan = {
       ...validPlanJson,
       steps: [{ ...validPlanJson.steps[0], input: {} }],
     };
     const svc = new NLPlanningService(makeLLM(invalidInputPlan), makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     const plan = await svc.plan('protect a file', ctx);
@@ -162,7 +316,7 @@ describe('NLPlanningService', () => {
         .mockResolvedValueOnce({ rawJson: validPlanJson }),
     };
     const svc = new NLPlanningService(llm, makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     const plan = await svc.plan('protect a file', ctx);
@@ -172,6 +326,76 @@ describe('NLPlanningService', () => {
     expect(secondCallTask).toContain('material.doesNotExist');
     expect(plan.error).toBeUndefined();
     expect(plan.steps).toEqual([expect.objectContaining({ toolName: 'material.protectFile' })]);
+  });
+
+  it('retries a valid weak-domain-only plan and returns the corrected domain plan', async () => {
+    const weakPlan = {
+      steps: [{ stepId: 'S1', toolName: 'man.sendAlert', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const correctedPlan = {
+      steps: [{ stepId: 'S2', toolName: 'env.readTemperature', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const llm = {
+      complete: jest.fn<LLMClient['complete']>()
+        .mockResolvedValueOnce({ rawJson: weakPlan })
+        .mockResolvedValueOnce({ rawJson: correctedPlan }),
+    };
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: makeToolbox([alertTool, temperatureTool]),
+    });
+
+    const plan = await svc.plan('設備過熱需要通知維修人員', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(2);
+    expect(llm.complete.mock.calls[1]![0].task).toContain(
+      '(Note: this task may also involve machine/env tools — before or instead of only sending a notification',
+    );
+    expect(plan.steps).toEqual([expect.objectContaining({ toolName: 'env.readTemperature' })]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('domains changed: true'));
+  });
+
+  it('does not retry a valid man-only plan for a purely man-domain task', async () => {
+    const weakPlan = {
+      steps: [{ stepId: 'S1', toolName: 'man.sendAlert', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const llm = makeLLM(weakPlan);
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: makeToolbox([alertTool]),
+    });
+
+    const plan = await svc.plan('通知維修人員', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(plan.steps).toEqual([expect.objectContaining({ toolName: 'man.sendAlert' })]);
+  });
+
+  it('accepts a valid weak-domain-only retry result without retrying again', async () => {
+    const firstPlan = {
+      steps: [{ stepId: 'S1', toolName: 'man.sendAlert', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const retryPlan = {
+      steps: [{ stepId: 'S2', toolName: 'man.sendAlert', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'partial-success',
+    };
+    const llm = {
+      complete: jest.fn<LLMClient['complete']>()
+        .mockResolvedValueOnce({ rawJson: firstPlan })
+        .mockResolvedValueOnce({ rawJson: retryPlan }),
+    };
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: makeToolbox([alertTool]),
+    });
+
+    const plan = await svc.plan('設備過熱需要通知維修人員', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(2);
+    expect(plan.steps[0]!.stepId).toBe('S2');
+    expect(plan.error).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('domains changed: false'));
   });
 
   it('surfaces a validation error when the retry still hallucinates a tool name', async () => {
@@ -184,7 +408,7 @@ describe('NLPlanningService', () => {
     };
     const llm = makeLLM(hallucinatedPlan); // every call returns the same hallucinated plan
     const svc = new NLPlanningService(llm, makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     const plan = await svc.plan('protect a file', ctx);
@@ -245,6 +469,9 @@ describe('NLPlanningService', () => {
         .mockRejectedValue(new Error('accounting timeout')),
       getNodeResources: jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
       listNodes: jest.fn<AccountingClient['listNodes']>().mockResolvedValue(mockNodes),
+      listFacilitiesForNodes: jest.fn<AccountingClient['listFacilitiesForNodes']>().mockResolvedValue([]),
+      getFacility: jest.fn<AccountingClient['getFacility']>().mockRejectedValue(new Error('not used in this test')),
+      suggestFacilityEdge: jest.fn<AccountingClient['suggestFacilityEdge']>().mockRejectedValue(new Error('not used in this test')),
     };
 
     await expect(
@@ -274,7 +501,7 @@ describe('NLPlanningService', () => {
       ],
     };
     const svc = new NLPlanningService(makeLLM(rawPlan), makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     const plan = await svc.plan('先處理第一項，然後接續處理第二項', ctx);
@@ -298,6 +525,108 @@ describe('NLPlanningService', () => {
       resources: { node1: [visible] },
       nodes: [expect.objectContaining({ resources: [visible] })],
     }));
+  });
+
+  describe('resolveNodeRouting (nodeId correction inside plan())', () => {
+    // hiba-planner has been observed (see
+    // .codex-claude-mailbox/threads/20260903-plan-local-tool-routing.md) to
+    // copy a worked-example literal like "node1" verbatim even when no real
+    // node is named that, instead of routing to a genuine local-only tool.
+    // These tests exercise the deterministic correction that stands in for
+    // the prompt-side fix that turned out to overflow the deployed model's
+    // context window.
+    const hallucinatedNodePlan = {
+      steps: [{
+        stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node1',
+        version: '1.0.0', input: { filePath: '/tmp/report.xml' }, dependsOn: [],
+      }],
+      supervisorPolicy: 'fail-fast',
+    };
+
+    it('routes to "local" when no real/online node matches and the tool is registered locally', async () => {
+      // "node1" here is NOT a real node in this fixture (contrast with the
+      // top-of-file mockNodes, where node1 IS real) — every real node is
+      // offline and none advertise material.protectFile.
+      const nodes: NodeDescriptor[] = [
+        { ...mockNodes[0]!, nodeId: 'node-1', status: 'offline', resources: [] },
+      ];
+      const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
+        toolbox: makeToolbox([protectFileTool]),
+      });
+
+      const plan = await svc.plan('保護這個檔案', ctx);
+
+      expect(plan.error).toBeUndefined();
+      expect(plan.steps[0]!.nodeId).toBe('local');
+    });
+
+    it('routes to a real online capable node instead of "local" when one exists', async () => {
+      const nodes: NodeDescriptor[] = [
+        {
+          ...mockNodes[0]!, nodeId: 'node-2', status: 'online', canInstall: false,
+          resources: [{ name: 'material.protectFile', type: 'tool', version: '1.0.0' }],
+        },
+      ];
+      const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
+        toolbox: makeToolbox([protectFileTool]),
+      });
+
+      const plan = await svc.plan('保護這個檔案', ctx);
+
+      expect(plan.steps[0]!.nodeId).toBe('node-2');
+    });
+
+    it('routes to a real online canInstall node when no node advertises the tool directly', async () => {
+      const nodes: NodeDescriptor[] = [
+        { ...mockNodes[0]!, nodeId: 'node-3', status: 'online', canInstall: true, resources: [] },
+      ];
+      const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
+        toolbox: makeToolbox([protectFileTool]),
+      });
+
+      const plan = await svc.plan('保護這個檔案', ctx);
+
+      expect(plan.steps[0]!.nodeId).toBe('node-3');
+    });
+
+    // The next two cases test resolveNodeRouting() directly rather than
+    // through plan(): when validatePlan() ends up rejecting the plan anyway
+    // (AGENT_NOT_REGISTERED, with no INPUT_REQUIRED/INPUT_INVALID issue to
+    // let the caller fix it), plan() clears steps to [] before returning
+    // (existing behavior, unrelated to this correction) — so the corrected
+    // (or deliberately un-corrected) nodeId isn't observable from plan()'s
+    // return value in these two cases.
+    it('leaves nodeId untouched when no real fallback exists (no online node, tool not local)', () => {
+      const steps: PlanStep[] = [{
+        stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node1',
+        version: '1.0.0', input: { filePath: '/tmp/report.xml' }, dependsOn: [],
+      }];
+      const nodes: NodeDescriptor[] = [
+        { ...mockNodes[0]!, nodeId: 'node-1', status: 'offline', resources: [] },
+      ];
+
+      const corrected = resolveNodeRouting(steps, [], nodes); // no registered tools at all
+
+      expect(corrected[0]!.nodeId).toBe('node1'); // unchanged from the LLM's raw output
+    });
+
+    it('never overrides a nodeId that matches a real (even offline/incapable) node', () => {
+      // node-1 is real but offline and doesn't advertise the tool — this must
+      // be left alone so validatePlan() surfaces AGENT_NOT_REGISTERED,
+      // never get silently rerouted, per the existing "never replace an
+      // explicitly requested node with local" rule.
+      const steps: PlanStep[] = [{
+        stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-1',
+        version: '1.0.0', input: { filePath: '/tmp/report.xml' }, dependsOn: [],
+      }];
+      const nodes: NodeDescriptor[] = [
+        { ...mockNodes[0]!, nodeId: 'node-1', status: 'offline', resources: [] },
+      ];
+
+      const corrected = resolveNodeRouting(steps, [protectFileTool], nodes);
+
+      expect(corrected[0]!.nodeId).toBe('node-1'); // not silently rerouted to "local"
+    });
   });
 
   it('summarizes execution results with a fact-only prompt', async () => {
@@ -329,6 +658,36 @@ describe('NLPlanningService', () => {
     }));
     expect(accounting.listNodeResources).toHaveBeenCalledTimes(1);
     expect(plannerLLM.complete).not.toHaveBeenCalled();
+  });
+
+  it('rejects a malformed run result instead of forwarding it to the LLM', async () => {
+    const plannerLLM = makeLLM(validPlanJson);
+    const summaryLLM = makeLLM({ steps: [{ stepId: 'S1', summary: 'n/a' }] });
+    const svc = new NLPlanningService(plannerLLM, makeAccounting(), { summaryLLM });
+
+    // "run" is unknown at the API boundary (POST /api/summarize forwards the
+    // raw HTTP body) -- a step missing toolName must not reach the LLM prompt.
+    await expect(svc.summarize('task', { steps: [{ stepId: 'S1', nodeId: 'node1' }] }))
+      .rejects.toThrow(/Invalid execution run result/);
+    expect(summaryLLM.complete).not.toHaveBeenCalled();
+  });
+
+  it('truncates an oversized step result instead of dumping it whole into the LLM input', async () => {
+    const plannerLLM = makeLLM(validPlanJson);
+    const summaryLLM = makeLLM({ steps: [{ stepId: 'S1', summary: '完成' }] });
+    const svc = new NLPlanningService(plannerLLM, makeAccounting(), { summaryLLM });
+    const hugeOutput = 'x'.repeat(5_000);
+
+    await svc.summarize('task', {
+      steps: [{
+        stepId: 'S1', nodeId: 'node1', toolName: 'machine.queryStatus',
+        result: { success: true, output: hugeOutput },
+      }],
+    });
+
+    const sentTask = summaryLLM.complete.mock.calls[0]![0].task;
+    expect(sentTask).toContain('_truncated');
+    expect(sentTask).not.toContain(hugeOutput);
   });
 
   it('fills default version "1.0.0" when LLM omits it', async () => {

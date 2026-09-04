@@ -37,7 +37,7 @@ app.use(express.json());
 app.use((req, res, next) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, DELETE');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Trace-Id, X-Agent-Id, X-Depth');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-Trace-Id, X-Agent-Id, X-Depth, X-Registration-Token');
   if (req.method === 'OPTIONS') { res.sendStatus(204); return; }
   next();
 });
@@ -47,6 +47,31 @@ const SCRIPTS_DIR = path.resolve(process.env.SCRIPTS_DIR ?? path.join(__dirname,
 const PORT       = parseInt(process.env.PORT ?? '3000');
 const ACCOUNTING_URL = (process.env.ACCOUNTING_URL ?? '').replace(/\/$/, '');
 const AGENT_URL = (process.env.AGENT_URL ?? '').replace(/\/$/, '');
+const CHILD_REGISTRATION_TOKEN = process.env.CHILD_REGISTRATION_TOKEN ?? '';
+const HIBA_RELAY_TOKEN = process.env.HIBA_RELAY_TOKEN ?? '';
+const PARENT_URL = (process.env.PARENT_URL ?? '').replace(/\/$/, '');
+const ATTESTATION_MODE = process.env.ATTESTATION_MODE ?? 'none';
+const CHILD_POLL_MS = 15_000;
+const CHILD_TASK_TIMEOUT_MS = 28_000;
+const childSessions = new Map();
+const pendingChildTasks = new Map();
+
+function childTokenMatches(value) {
+  if (!CHILD_REGISTRATION_TOKEN || typeof value !== 'string') return false;
+  const supplied = Buffer.from(value);
+  const expected = Buffer.from(CHILD_REGISTRATION_TOKEN);
+  return supplied.length === expected.length && crypto.timingSafeEqual(supplied, expected);
+}
+
+function childAuthorized(req, res) {
+  if (childTokenMatches(req.get('X-Registration-Token'))) return true;
+  res.status(CHILD_REGISTRATION_TOKEN ? 401 : 503).json({
+    success: false,
+    errorCode: CHILD_REGISTRATION_TOKEN ? 'UNAUTHORIZED' : 'REGISTRATION_DISABLED',
+    error: CHILD_REGISTRATION_TOKEN ? 'Invalid registration token' : 'CHILD_REGISTRATION_TOKEN is not configured',
+  });
+  return false;
+}
 
 // ── 啟動時確保必要目錄存在 ────────────────────────────────────────
 // 同時處理：新系統（00_setup.sh 剛跑完）與舊系統加裝（目錄可能缺）
@@ -177,6 +202,168 @@ app.get('/health', (_req, res) => {
 app.get('/scripts', (_req, res) => {
   res.json({ nodeId: NODE_ID, scripts: manifest });
 });
+
+// The child only opens outbound HTTP requests. Accounting sees this parent relay URL.
+app.post('/children/connect', async (req, res) => {
+  if (!childAuthorized(req, res)) return;
+  if (!AGENT_URL || !HIBA_RELAY_TOKEN) {
+    res.status(503).json({ success: false, errorCode: 'RELAY_DISABLED', error: 'AGENT_URL and HIBA_RELAY_TOKEN are required' });
+    return;
+  }
+  const { nodeId, scripts = [], attestationMode = 'none' } = req.body ?? {};
+  if (typeof nodeId !== 'string' || !nodeId.trim() || nodeId === NODE_ID || !Array.isArray(scripts)) {
+    res.status(400).json({ success: false, errorCode: 'REQUEST_INVALID', error: 'nodeId and scripts are required' });
+    return;
+  }
+  if (!['tpm2', 'software', 'demo', 'none'].includes(attestationMode)) {
+    res.status(400).json({ success: false, errorCode: 'REQUEST_INVALID', error: 'attestationMode is invalid' });
+    return;
+  }
+  const resources = scripts.map(tool => ({
+    name: tool.name ?? tool.toolName,
+    version: tool.version ?? '1.0.0',
+    type: 'tool',
+    ...(tool.metadata ? { metadata: tool.metadata } : {}),
+  })).filter(tool => tool.name);
+  const previous = childSessions.get(nodeId);
+  const session = {
+    nodeId, scripts, resources, attestationMode,
+    lastSeenAt: Date.now(), lastHeartbeatAt: 0,
+    queue: previous?.queue ?? [], waiter: null,
+  };
+  if (previous?.waiter) {
+    clearTimeout(previous.waiter.timer);
+    previous.waiter.res.json({ task: null, reconnect: true });
+  }
+  childSessions.set(nodeId, session);
+
+  res.status(202).json({ success: true, nodeId, parentNodeId: NODE_ID, routeType: 'parent-relay', connectionStatus: 'pending_approval', tpmVerified: false });
+});
+
+app.get('/children/registrations', (req, res) => {
+  const supplied = String(req.get('X-Parent-Registration-Token') ?? '');
+  const expected = Buffer.from(HIBA_RELAY_TOKEN);
+  const actual = Buffer.from(supplied);
+  if (!HIBA_RELAY_TOKEN || actual.length !== expected.length || !crypto.timingSafeEqual(actual, expected)) {
+    res.status(401).json({ success: false, errorCode: 'UNAUTHORIZED', error: 'Invalid relay token' });
+    return;
+  }
+  res.json({
+    nodeId: NODE_ID,
+    children: [...childSessions.values()].map(child => ({
+      nodeId: child.nodeId,
+      parentNodeId: NODE_ID,
+      routeType: 'parent-relay',
+      relayUrl: `${AGENT_URL}/children/${encodeURIComponent(child.nodeId)}`,
+      status: Date.now() - child.lastSeenAt < 35_000 ? 'online' : 'offline',
+      lastSeenAt: new Date(child.lastSeenAt).toISOString(),
+      attestationMode: child.attestationMode,
+      tpmVerified: false,
+      resources: child.resources,
+    })),
+  });
+});
+
+app.post('/children/poll', (req, res) => {
+  if (!childAuthorized(req, res)) return;
+  const session = childSessions.get(req.body?.nodeId);
+  if (!session) {
+    res.status(409).json({ success: false, errorCode: 'SESSION_NOT_FOUND', error: 'Child must register again' });
+    return;
+  }
+  session.lastSeenAt = Date.now();
+  if (session.queue.length) {
+    res.json({ task: session.queue.shift() });
+    return;
+  }
+  if (session.waiter) {
+    clearTimeout(session.waiter.timer);
+    session.waiter.res.json({ task: null, replaced: true });
+  }
+  const timer = setTimeout(() => {
+    if (session.waiter?.res === res) session.waiter = null;
+    res.json({ task: null });
+  }, CHILD_POLL_MS);
+  session.waiter = { res, timer };
+  res.on('close', () => {
+    if (!res.writableEnded && session.waiter?.res === res) {
+      clearTimeout(timer);
+      session.waiter = null;
+    }
+  });
+
+});
+
+app.post('/children/result', (req, res) => {
+  if (!childAuthorized(req, res)) return;
+  const { nodeId, taskId, statusCode = 200, body } = req.body ?? {};
+  const pending = pendingChildTasks.get(taskId);
+  if (!pending || pending.nodeId !== nodeId) {
+    res.status(404).json({ success: false, errorCode: 'TASK_NOT_FOUND', error: 'Relay task is no longer pending' });
+    return;
+  }
+  clearTimeout(pending.timer);
+  pendingChildTasks.delete(taskId);
+  pending.res.status(Number.isInteger(statusCode) ? statusCode : 200).json(body);
+  res.json({ success: true, taskId });
+});
+
+app.get('/children/:nodeId/health', (req, res) => {
+  const session = childSessions.get(req.params.nodeId);
+  if (!session) {
+    res.status(404).json({ nodeId: req.params.nodeId, status: 'offline', parentNodeId: NODE_ID });
+    return;
+  }
+  res.json({ nodeId: session.nodeId, status: Date.now() - session.lastSeenAt < 35_000 ? 'online' : 'offline', parentNodeId: NODE_ID, routeType: 'parent-relay' });
+});
+
+app.get('/children/:nodeId/scripts', (req, res) => {
+  const session = childSessions.get(req.params.nodeId);
+  if (!session) { res.status(404).json({ nodeId: req.params.nodeId, scripts: [] }); return; }
+  res.json({ nodeId: session.nodeId, scripts: session.scripts, parentNodeId: NODE_ID });
+});
+
+function relayChildPost(path) {
+  return (req, res) => {
+  const session = childSessions.get(req.params.nodeId);
+  if (!session || Date.now() - session.lastSeenAt >= 35_000) {
+    res.status(503).json({ success: false, errorCode: 'NODE_OFFLINE', error: `Child '${req.params.nodeId}' has no active reverse channel`, retryable: true });
+    return;
+  }
+  const taskId = crypto.randomUUID();
+  const task = {
+    taskId,
+    path,
+    body: req.body,
+    headers: {
+      'X-Agent-Id': req.get('X-Agent-Id') ?? 'parent-relay',
+      'X-Trace-Id': req.get('X-Trace-Id') ?? `relay-${taskId}`,
+      'X-Step-Id': req.get('X-Step-Id') ?? '',
+      'X-Depth': req.get('X-Depth') ?? '0',
+    },
+  };
+  const timer = setTimeout(() => {
+    if (!pendingChildTasks.delete(taskId)) return;
+    res.status(504).json({ success: false, errorCode: 'TOOL_TIMEOUT', error: `Child '${session.nodeId}' did not return task '${taskId}'`, retryable: true });
+  }, CHILD_TASK_TIMEOUT_MS);
+  pendingChildTasks.set(taskId, { nodeId: session.nodeId, res, timer });
+  res.on('close', () => {
+    const pending = pendingChildTasks.get(taskId);
+    if (!res.writableEnded && pending?.res === res) { clearTimeout(timer); pendingChildTasks.delete(taskId); }
+  });
+  if (session.waiter) {
+    clearTimeout(session.waiter.timer);
+    const waiter = session.waiter;
+    session.waiter = null;
+    waiter.res.json({ task });
+  } else {
+    session.queue.push(task);
+  }
+  };
+}
+
+app.post('/children/:nodeId/api/execute', relayChildPost('/api/execute'));
+app.post('/children/:nodeId/execute', relayChildPost('/execute'));
 
 // ── 核心執行邏輯（/execute 與 /api/execute 共用）──────────────────
 /**
@@ -453,6 +640,63 @@ app.post('/cmd', (req, res) => {
 });
 
 // ── 啟動 ──────────────────────────────────────────────────────────
+async function runReverseChannel() {
+  let registered = false;
+  while (true) {
+    try {
+      if (!registered) {
+        const response = await fetch(`${PARENT_URL}/children/connect`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Registration-Token': CHILD_REGISTRATION_TOKEN },
+          body: JSON.stringify({ nodeId: NODE_ID, scripts: manifest, attestationMode: ATTESTATION_MODE }),
+          signal: AbortSignal.timeout(20_000),
+        });
+        if (!response.ok) throw new Error(`register HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+        registered = true;
+        console.log(`[Relay] registered ${NODE_ID} through ${PARENT_URL}`);
+      }
+
+      const poll = await fetch(`${PARENT_URL}/children/poll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Registration-Token': CHILD_REGISTRATION_TOKEN },
+        body: JSON.stringify({ nodeId: NODE_ID }),
+        signal: AbortSignal.timeout(CHILD_POLL_MS + 5_000),
+      });
+      if (poll.status === 409) { registered = false; continue; }
+      if (!poll.ok) throw new Error(`poll HTTP ${poll.status}`);
+      const { task } = await poll.json();
+      if (!task) continue;
+
+      let statusCode = 500;
+      let body = { success: false, errorCode: 'HANDLER_EXECUTION_FAILED', error: 'Child execution failed' };
+      try {
+        const local = await fetch(`http://127.0.0.1:${PORT}${task.path}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', ...(task.headers ?? {}) },
+          body: JSON.stringify(task.body ?? {}),
+          signal: AbortSignal.timeout(CHILD_TASK_TIMEOUT_MS),
+        });
+        statusCode = local.status;
+        const text = await local.text();
+        try { body = text ? JSON.parse(text) : {}; }
+        catch { body = { success: false, errorCode: 'HANDLER_EXECUTION_FAILED', error: text.slice(0, 2_000) }; }
+      } catch (error) {
+        body.error = error.message;
+      }
+      const result = await fetch(`${PARENT_URL}/children/result`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Registration-Token': CHILD_REGISTRATION_TOKEN },
+        body: JSON.stringify({ nodeId: NODE_ID, taskId: task.taskId, statusCode, body }),
+        signal: AbortSignal.timeout(10_000),
+      });
+      if (!result.ok && result.status !== 404) throw new Error(`result HTTP ${result.status}`);
+    } catch (error) {
+      console.warn(`[Relay] ${error.message}; retrying`);
+      await new Promise(resolve => setTimeout(resolve, 2_000));
+    }
+  }
+}
+
 async function registerWithAccounting() {
   if (!ACCOUNTING_URL || !AGENT_URL) return;
   try {
@@ -481,8 +725,12 @@ async function heartbeatAccounting() {
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-  void registerWithAccounting();
-  setInterval(heartbeatAccounting, 10_000).unref();
+  if (PARENT_URL) {
+    void runReverseChannel();
+  } else {
+    void registerWithAccounting();
+    setInterval(heartbeatAccounting, 10_000).unref();
+  }
   console.log(`[${NODE_ID}] Sub-Web 已啟動 :${PORT}`);
   console.log(`[Scripts]  ${SCRIPTS_DIR}`);
 });

@@ -209,4 +209,57 @@ describe('AuditTrail', () => {
     });
     await expect(auditTrail.batchUploadToChain(['trace-001'], ctx)).rejects.toBeInstanceOf(HiBAError);
   });
+
+  describe('queryExemplars', () => {
+    it('returns only successful records, most recent first', async () => {
+      // 為什麼重要：exemplars 是要餵給 LLM 當 few-shot 參考的「成功案例」——
+      // 混進失敗案例會讓模型把錯誤示範學成正常行為。
+      const auditTrail = new AuditTrail(':memory:');
+      await auditTrail.write(createRecord({
+        traceId: 'trace-fail', auditHash: 'hash-fail', success: false,
+        executedAt: '2026-05-04T00:00:02.000Z',
+      }));
+      await auditTrail.write(createRecord({
+        traceId: 'trace-old', auditHash: 'hash-old', success: true,
+        executedAt: '2026-05-04T00:00:00.000Z',
+      }));
+      await auditTrail.write(createRecord({
+        traceId: 'trace-new', auditHash: 'hash-new', success: true,
+        executedAt: '2026-05-04T00:00:01.000Z',
+      }));
+
+      const exemplars = await auditTrail.queryExemplars({ limit: 10 });
+
+      expect(exemplars.map(e => e.traceId)).toEqual(['trace-new', 'trace-old']);
+    });
+
+    it('filters by toolDomain when provided', async () => {
+      const auditTrail = new AuditTrail(':memory:');
+      await auditTrail.write(createRecord({
+        traceId: 'trace-material', auditHash: 'hash-material', toolDomain: 'material', success: true,
+      }));
+      await auditTrail.write(createRecord({
+        traceId: 'trace-machine', auditHash: 'hash-machine', toolDomain: 'machine', success: true,
+      }));
+
+      const exemplars = await auditTrail.queryExemplars({ toolDomain: 'machine', limit: 10 });
+
+      expect(exemplars).toHaveLength(1);
+      expect(exemplars[0]?.traceId).toBe('trace-machine');
+    });
+
+    it('respects the limit', async () => {
+      const auditTrail = new AuditTrail(':memory:');
+      for (let i = 0; i < 5; i += 1) {
+        await auditTrail.write(createRecord({
+          traceId: `trace-${i}`, auditHash: `hash-${i}`, success: true,
+          executedAt: `2026-05-04T00:00:0${i}.000Z`,
+        }));
+      }
+
+      const exemplars = await auditTrail.queryExemplars({ limit: 2 });
+
+      expect(exemplars).toHaveLength(2);
+    });
+  });
 });

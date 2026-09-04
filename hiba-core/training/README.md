@@ -4,7 +4,12 @@
 
 ## 固定契約
 
-- 輸入：任務文字、`resources`、`NodeDescriptor[]`、`ToolSpec[]`
+- 輸入：任務文字（`instruction`）+ system prompt（`system`，由真正的
+  `buildDefaultSystemPrompt()` 產生，含 `resources`／`NodeDescriptor[]`／
+  `ToolSpec[]` 的精簡摘要——train/eval prompt 跟 production 實際送出的一致，
+  見 `實作規格/plan_LLM_訓練清單.md` §十四）。`context` 欄位另外保留同一批
+  結構化 JSON，但**不會**餵給模型，只給 `validate-dataset.mjs`／
+  `benchmark_quality.py` 做機械式檢查用
 - 輸出：`protocolVersion`、`steps[]`、`supervisorPolicy`
 - 每個 step：`stepId`、`toolName`、`nodeId`、`version`、`input`、`dependsOn`
 - 禁止使用舊欄位：`tool`、`script`、`args`

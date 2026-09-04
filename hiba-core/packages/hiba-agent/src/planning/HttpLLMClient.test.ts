@@ -180,6 +180,27 @@ describe('HttpLLMClient system prompt', () => {
     // local context window even with 36 tools registered.
     expect(systemPrompt.length / 4).toBeLessThan(3500);
   });
+
+  // §Rule 3 extension (plan_LLM_訓練清單.md, plan()-local-tool-routing thread):
+  // validatePlan() and OrchestratorRunner already special-case nodeId==='local',
+  // but the prompt never told the model that was an option -- a node-unspecified
+  // task needing a hiba-agent-only tool (no online node advertises or can
+  // install it) had no legal nodeId to pick and always failed AGENT_NOT_REGISTERED.
+  it('tells the model nodeId can be "local" for tools no online node can run', async () => {
+    let capturedBody: { messages: Array<{ content: string }> } | undefined;
+    jest.spyOn(global, 'fetch').mockImplementation(async (_url, init) => {
+      capturedBody = JSON.parse((init as RequestInit).body as string);
+      return new Response(JSON.stringify({ choices: [{ message: { content: '{"steps":[]}' } }] }));
+    });
+
+    const client = new HttpLLMClient('http://localhost:11434/v1/chat/completions', { format: 'openai' });
+    await client.complete({ task: 'do something', resources: {}, nodes: [], tools: [], requestedAt: '2026-01-01T00:00:00Z' });
+
+    const systemPrompt = capturedBody!.messages[0]!.content;
+    expect(systemPrompt).toContain('<an online node from Live Node Descriptors, or local per Rule 3>');
+    expect(systemPrompt).toContain('use nodeId "local" to execute it in the hiba-agent local toolbox');
+    expect(systemPrompt).toContain('Never replace an explicitly requested node with "local"');
+  });
 });
 
 // ── HttpLLMClient malformed-JSON retry ──────────────────────────────────────

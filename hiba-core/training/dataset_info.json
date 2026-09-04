@@ -4,7 +4,7 @@
     "formatting": "alpaca",
     "columns": {
       "prompt": "instruction",
-      "query": "input",
+      "system": "system",
       "response": "output"
     }
   }

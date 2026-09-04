@@ -46,19 +46,33 @@ function hasCycle(steps) {
 
 export function validateRow(row) {
   fail(row && typeof row === 'object', 'row must be object');
-  for (const key of ['instruction', 'input', 'output']) fail(typeof row[key] === 'string', `${key} must be string`);
+  // `system` is what LLaMA-Factory actually trains on (mapped via
+  // dataset_info.json's "system" column, built by the real
+  // buildDefaultSystemPrompt() -- see plan_LLM_訓練清單.md §十四).
+  // `context` is the raw structured {resources, nodes, tools} used only by
+  // this validator and benchmark_quality.py to mechanically check the plan;
+  // it is NOT fed to the model (not in dataset_info.json's columns map).
+  for (const key of ['instruction', 'system', 'context', 'output']) fail(typeof row[key] === 'string', `${key} must be string`);
 
   let context;
   let plan;
-  try { context = JSON.parse(row.input); } catch { throw new Error('input must contain JSON'); }
+  try { context = JSON.parse(row.context); } catch { throw new Error('context must contain JSON'); }
   try { plan = JSON.parse(row.output); } catch { throw new Error('output must contain JSON'); }
 
-  fail(context.protocolVersion === PROTOCOL_VERSION, 'input protocolVersion must be 1.0');
-  fail(Array.isArray(context.tools), 'input.tools must be array');
-  fail(Array.isArray(context.nodes), 'input.nodes must be array');
+  fail(context.protocolVersion === PROTOCOL_VERSION, 'context protocolVersion must be 1.0');
+  fail(Array.isArray(context.tools), 'context.tools must be array');
+  fail(Array.isArray(context.nodes), 'context.nodes must be array');
   fail(plan.protocolVersion === PROTOCOL_VERSION, 'output protocolVersion must be 1.0');
-  fail(Array.isArray(plan.steps) && plan.steps.length > 0, 'output.steps must be non-empty array');
+  fail(Array.isArray(plan.steps), 'output.steps must be array');
   fail(['fail-fast', 'partial-success'].includes(plan.supervisorPolicy), 'invalid supervisorPolicy');
+  // reject 決策 pattern（見 plan_LLM_訓練清單.md §三-E）：steps 為空時必須附上 error 說明；
+  // 其餘情況（無 error）steps 不得為空，避免規劃器學到「隨便回空計畫」。
+  if (plan.error !== undefined) {
+    fail(typeof plan.error === 'string' && plan.error.length > 0, 'output.error must be non-empty string when present');
+    fail(plan.steps.length === 0, 'output.steps must be empty when error is present');
+  } else {
+    fail(plan.steps.length > 0, 'output.steps must be non-empty array when no error');
+  }
 
   const tools = new Map(context.tools.map(item => [`${item.name}@${item.version}`, item]));
   const nodes = new Map(context.nodes.map(item => [item.nodeId, item]));

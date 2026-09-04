@@ -1,0 +1,45 @@
+### model
+model_name_or_path: meta-llama/Llama-3.1-8B-Instruct
+
+### method (optimized: identical to train_config.yaml except lora_target and cutoff_len --
+### see mailbox/2026-08-24_hiba-planner-lora-speed-diagnosis.md for why)
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_rank: 32
+lora_alpha: 64
+lora_dropout: 0.05
+lora_target: q_proj,k_proj,v_proj,o_proj
+
+### dataset
+dataset: hiba_workflow_v1
+dataset_dir: ./training
+template: llama3
+cutoff_len: 2048
+overwrite_cache: true
+preprocessing_num_workers: 1
+
+### output
+output_dir: ./training/hiba-planner-v1-lora-optimized
+logging_dir: ./training/logs-v1-optimized
+logging_steps: 10
+save_steps: 10
+plot_loss: true
+overwrite_output_dir: false
+
+### train
+per_device_train_batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 0.0001
+num_train_epochs: 3
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000
+seed: 42
+
+### eval
+val_size: 0.1
+per_device_eval_batch_size: 2
+eval_strategy: steps
+eval_steps: 20

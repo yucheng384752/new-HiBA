@@ -240,7 +240,11 @@ export function buildPlanJsonSchema(tools: ToolSpec[]): Record<string, unknown> 
   };
 }
 
-function buildDefaultSystemPrompt(
+// Exported so the training-data generator can build system prompts identical
+// to what production actually sends (single source of truth for the prompt
+// format — see plan_LLM_訓練清單.md §十四 for why training/eval previously
+// diverged from this).
+export function buildDefaultSystemPrompt(
   resources: NodeResourceMap,
   nodes: NodeDescriptor[],
   tools: ToolSpec[],
@@ -292,7 +296,7 @@ ${toolBlock}
     {
       "stepId":    "S1",
       "toolName":  "<copied verbatim from Available Tools>",
-      "nodeId":    "<an online node from Live Node Descriptors>",
+      "nodeId":    "<an online node from Live Node Descriptors, or local per Rule 3>",
       "version":   "<copied verbatim from the same Available Tools entry>",
       "input":     { "...": "must match that tool's input fields" },
       "dependsOn": []
@@ -334,7 +338,9 @@ Correct plan:
    WRONG — they are not in the list). If no tool in the list fits the task,
    return {"steps": [], "supervisorPolicy": "fail-fast", "error": "no matching tool for task"}.
 2. version must be copied from the same Available Tools entry as toolName.
-3. nodeId must be an online node that advertises the tool, or an online node with canInstall=true
+3. nodeId must be an online node that advertises the tool, or an online node with canInstall=true.
+   If the task does not specify a node and neither option exists for a tool listed in "Available Tools",
+   use nodeId "local" to execute it in the hiba-agent local toolbox. Never replace an explicitly requested node with "local".
 4. stepId must be unique: S1, S2, S3, ...
 5. dependsOn lists stepIds that must complete before this step
 6. input must validate against the tool's inputSchema; never invent parameter names

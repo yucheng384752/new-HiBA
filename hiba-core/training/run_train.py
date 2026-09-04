@@ -19,6 +19,7 @@ from llamafactory.data.collator import SFTDataCollatorWith4DAttentionMask  # noq
 if __name__ == "__main__":
     project_root = Path(__file__).parent.parent
     os.chdir(project_root)
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "training/train_config.yaml"
     subprocess.run([
         "node", "tools/validate-dataset.mjs",
         "training/data/hiba-v1-train.jsonl",
@@ -27,7 +28,10 @@ if __name__ == "__main__":
 
     import datasets as _datasets
     _datasets.disable_caching()
-    print("[run_train] dataset validated; starting Llama 3.1 LoRA training", flush=True)
-    sys.argv = ["llamafactory-cli", "train", "training/train_config.yaml"]
+    print(f"[run_train] dataset validated; starting Llama 3.1 LoRA training ({config_path})", flush=True)
+    sys.argv = ["llamafactory-cli", "train", config_path]
     from llamafactory.cli import main
     main()
+
+    # Every run gets a permanent record in training/run-history.jsonl -- not just terminal scrollback.
+    subprocess.run([sys.executable, "training/record_run.py", config_path], check=True)

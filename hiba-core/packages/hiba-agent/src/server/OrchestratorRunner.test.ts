@@ -20,6 +20,7 @@
 
 import { test, expect, beforeAll, afterAll, describe } from '@jest/globals';
 import http from 'node:http';
+import { readFile } from 'node:fs/promises';
 import { z } from 'zod';
 import { OrchestratorRunner, parseNodeAddresses, type OrchestratorOptions } from './OrchestratorRunner';
 import { AgentServer } from './AgentServer';
@@ -50,6 +51,21 @@ function makeRunner(anchorShouldFail = false, nodeAddresses?: Map<string, string
       : async () => { /* noop */ };
 
   const toolbox = new HiBAToolbox({ auditWriter: audit, permissions: ['material.write', 'material.read'] });
+
+  toolbox.register(defineTool({
+    name: 'material.readAttachment',
+    version: '1.0.0',
+    tags: ['material', 'read'],
+    description: 'read attachment',
+    inputSchema: z.object({ _filePath: z.string().optional(), _fileName: z.string().optional() }),
+    outputSchema: z.object({ filePath: z.string(), content: z.string() }),
+    permissions: ['material.read'],
+    timeout: 5_000,
+    handler: async input => ({
+      filePath: input._filePath ?? '',
+      content: input._filePath ? await readFile(input._filePath, 'utf8') : '',
+    }),
+  }));
 
   toolbox.register(defineTool({
     name: 'material.protectFile',
@@ -288,6 +304,9 @@ const mockAccounting: AccountingClient = {
   listNodeResources: async () => ({}),
   getNodeResources: async () => [],
   listNodes: async () => [],
+  listFacilitiesForNodes: async () => [],
+  getFacility: async () => { throw new Error('not used in this test'); },
+  suggestFacilityEdge: async () => { throw new Error('not used in this test'); },
 };
 
 let remoteServer: AgentServer;
@@ -297,6 +316,17 @@ beforeAll(async () => {
   remotePort = 18200;
   const audit   = new AuditTrail(':memory:');
   const toolbox = new HiBAToolbox({ auditWriter: audit, permissions: ['material.write', 'material.read'] });
+  toolbox.register(defineTool({
+    name: 'material.readAttachment',
+    version: '1.0.0',
+    tags: ['material', 'read'],
+    description: 'read attachment on remote node',
+    inputSchema: z.object({ _filePath: z.string(), _fileName: z.string().optional() }),
+    outputSchema: z.object({ filePath: z.string(), content: z.string() }),
+    permissions: ['material.read'],
+    timeout: 5_000,
+    handler: async input => ({ filePath: input._filePath, content: await readFile(input._filePath, 'utf8') }),
+  }));
   toolbox.register(defineTool({
     name: 'material.protectFile',
     version: '1.0.0',
@@ -322,6 +352,47 @@ afterAll(async () => {
 });
 
 describe('remote dispatch', () => {
+  test('POST /api/run transfers an attachment to a second AgentServer and protects it there', async () => {
+    const audits: AuditTrail[] = [];
+    const runner = makeRunner(false, new Map([['node-remote', `http://localhost:${remotePort}`]]), undefined, audits);
+    const orchestratorServer = new AgentServer(new NLPlanningService(mockLLM, mockAccounting), {
+      port: 18203,
+      orchestrator: runner,
+      defaultCtx: { hibaBaseUrl: 'http://localhost:9090', permissions: ['material.write', 'material.read'] },
+    });
+    await orchestratorServer.start();
+    try {
+      const res = await fetch('http://localhost:18203/api/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Trace-Id': 'trace-attachment-remote' },
+        body: JSON.stringify({ plan: {
+          steps: [
+            { stepId: 'S1', toolName: 'material.readAttachment', nodeId: 'node-remote', version: '1.0.0',
+              input: { _attachment: { name: 'proof.txt', content: 'remote proof' } }, dependsOn: [] },
+            { stepId: 'S2', toolName: 'material.protectFile', nodeId: 'node-remote', version: '1.0.0',
+              input: { filePath: '$steps.S1.output.filePath' }, dependsOn: ['S1'] },
+          ],
+          supervisorPolicy: 'fail-fast',
+        } }),
+      });
+      const result = await res.json() as { succeeded: number; steps: Array<{ stepId: string; nodeId: string; dispatched: string; result: { success: boolean; output?: { content?: string } } }> };
+      expect(res.status).toBe(200);
+      expect(result.succeeded).toBe(2);
+      expect(result.steps[0]?.result.output?.content).toBe('remote proof');
+      expect(result.steps[1]).toEqual(expect.objectContaining({ stepId: 'S2', nodeId: 'node-remote', dispatched: 'remote' }));
+      const events = await audits[0]!.queryEvents({ eventType: 'DATA_TRANSFERRED' });
+      expect(events).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          traceId: 'trace-attachment-remote',
+          success: true,
+          metadata: expect.objectContaining({ nodeId: 'node-remote', stepId: 'S2' }),
+        }),
+      ]));
+    } finally {
+      await orchestratorServer.stop();
+    }
+  });
+
   test('dispatched=remote when nodeId registered; result from remote server', async () => {
     const nodeAddresses = new Map([['node-remote', `http://localhost:${remotePort}`]]);
     const audits: AuditTrail[] = [];
