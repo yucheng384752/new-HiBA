@@ -3,6 +3,7 @@ import {
   inferDomainsFromIntent,
   NLPlanningService,
   resolveNodeRouting,
+  usesOnlyWeakDomains,
   type LLMClient,
   type AccountingClient,
   type NodeResourceMap,
@@ -50,6 +51,9 @@ const protectFileTool = defineTool({
   timeout: 1_000,
   handler: async () => ({ ok: true }),
 });
+
+const alertTool: RegisteredTool = { ...protectFileTool, name: 'man.sendAlert' };
+const temperatureTool: RegisteredTool = { ...protectFileTool, name: 'env.readTemperature' };
 
 const retrievalCatalog: RegisteredTool[] = [
   protectFileTool,
@@ -136,6 +140,20 @@ describe('NLPlanningService', () => {
 
   it('returns undefined when the intent has no known domain keyword', () => {
     expect(inferDomainsFromIntent('請協助處理這件事情')).toBeUndefined();
+  });
+
+  it.each<[PlanStep[], string, boolean]>([
+    [[{ ...validPlanJson.steps[0]!, toolName: 'man.sendAlert' }], '設備過熱需要通知維修人員', true],
+    [[{ ...validPlanJson.steps[0]!, toolName: 'man.sendAlert' }], '通知維修人員', false],
+    [[{ ...validPlanJson.steps[0]!, toolName: 'orchestrator.deploy' }], '更新節點', false],
+    [[{ ...validPlanJson.steps[0]!, toolName: 'man.sendAlert' }], '請協助處理這件事情', false],
+    [[], '設備過熱需要通知維修人員', false],
+    [[
+      { ...validPlanJson.steps[0]!, toolName: 'man.sendAlert' },
+      { ...validPlanJson.steps[0]!, stepId: 'S2', toolName: 'machine.queryStatus' },
+    ], '設備過熱需要通知維修人員', false],
+  ])('detects weak-only plans only when the task also implies another domain', (steps, task, expected) => {
+    expect(usesOnlyWeakDomains(steps, task)).toBe(expected);
   });
 
   it('returns a valid ExecutionPlan when LLM produces correct JSON', async () => {
@@ -308,6 +326,76 @@ describe('NLPlanningService', () => {
     expect(secondCallTask).toContain('material.doesNotExist');
     expect(plan.error).toBeUndefined();
     expect(plan.steps).toEqual([expect.objectContaining({ toolName: 'material.protectFile' })]);
+  });
+
+  it('retries a valid weak-domain-only plan and returns the corrected domain plan', async () => {
+    const weakPlan = {
+      steps: [{ stepId: 'S1', toolName: 'man.sendAlert', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const correctedPlan = {
+      steps: [{ stepId: 'S2', toolName: 'env.readTemperature', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const llm = {
+      complete: jest.fn<LLMClient['complete']>()
+        .mockResolvedValueOnce({ rawJson: weakPlan })
+        .mockResolvedValueOnce({ rawJson: correctedPlan }),
+    };
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: makeToolbox([alertTool, temperatureTool]),
+    });
+
+    const plan = await svc.plan('設備過熱需要通知維修人員', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(2);
+    expect(llm.complete.mock.calls[1]![0].task).toContain(
+      '(Note: this task may also involve machine/env tools — before or instead of only sending a notification',
+    );
+    expect(plan.steps).toEqual([expect.objectContaining({ toolName: 'env.readTemperature' })]);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('domains changed: true'));
+  });
+
+  it('does not retry a valid man-only plan for a purely man-domain task', async () => {
+    const weakPlan = {
+      steps: [{ stepId: 'S1', toolName: 'man.sendAlert', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const llm = makeLLM(weakPlan);
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: makeToolbox([alertTool]),
+    });
+
+    const plan = await svc.plan('通知維修人員', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(1);
+    expect(plan.steps).toEqual([expect.objectContaining({ toolName: 'man.sendAlert' })]);
+  });
+
+  it('accepts a valid weak-domain-only retry result without retrying again', async () => {
+    const firstPlan = {
+      steps: [{ stepId: 'S1', toolName: 'man.sendAlert', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'fail-fast',
+    };
+    const retryPlan = {
+      steps: [{ stepId: 'S2', toolName: 'man.sendAlert', nodeId: 'local', input: { filePath: '/tmp/x' }, dependsOn: [] }],
+      supervisorPolicy: 'partial-success',
+    };
+    const llm = {
+      complete: jest.fn<LLMClient['complete']>()
+        .mockResolvedValueOnce({ rawJson: firstPlan })
+        .mockResolvedValueOnce({ rawJson: retryPlan }),
+    };
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: makeToolbox([alertTool]),
+    });
+
+    const plan = await svc.plan('設備過熱需要通知維修人員', ctx);
+
+    expect(llm.complete).toHaveBeenCalledTimes(2);
+    expect(plan.steps[0]!.stepId).toBe('S2');
+    expect(plan.error).toBeUndefined();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('domains changed: false'));
   });
 
   it('surfaces a validation error when the retry still hallucinates a tool name', async () => {

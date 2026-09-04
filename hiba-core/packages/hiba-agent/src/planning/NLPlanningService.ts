@@ -60,6 +60,16 @@ export function inferDomainsFromIntent(task: string): Domain[] | undefined {
   return domains.length > 0 ? domains : undefined;
 }
 
+const WEAK_DOMAINS = new Set<Domain>(['man', 'orchestrator']);
+
+export function usesOnlyWeakDomains(steps: PlanStep[], task: string): boolean {
+  const usedDomains = new Set(steps.map(step => step.toolName.split('.')[0]));
+  const inferredDomains = inferDomainsFromIntent(task);
+  return usedDomains.size > 0
+    && [...usedDomains].every(domain => WEAK_DOMAINS.has(domain as Domain))
+    && Boolean(inferredDomains?.some(domain => !WEAK_DOMAINS.has(domain)));
+}
+
 // ── Pluggable Interfaces ───────────────────────────────────────────────────────
 // Both interfaces are minimal — swap any implementation without touching the service.
 
@@ -298,7 +308,31 @@ export class NLPlanningService {
     plan = { ...plan, steps: resolveNodeRouting(plan.steps, registeredTools, nodes) };
 
     let validation = validatePlan(plan, { tools: registeredTools, nodes });
-    if (validation.valid) return validation.plan;
+    if (validation.valid) {
+      const originalPlan = validation.plan;
+      if (!usesOnlyWeakDomains(originalPlan.steps, task)) return originalPlan;
+
+      const otherDomains = (inferDomainsFromIntent(task) ?? []).filter(domain => !WEAK_DOMAINS.has(domain));
+      const correctedTask = `${task}\n\n(Note: this task may also involve ${otherDomains.join('/')} `
+        + `tools — before or instead of only sending a notification, check `
+        + `whether a diagnostic or query step is needed first.)`;
+      plan = await this.generateNormalizedPlan(correctedTask, registeredTools, tools, planningResources, planningNodes);
+      if (plan.error) {
+        console.warn(
+          `[NLPlanningService] weak-domain-only plan for task "${task}" despite inferred `
+          + `${otherDomains.join('/')} domain(s); retry failed; domains changed: false`,
+        );
+        return originalPlan;
+      }
+      plan = { ...plan, steps: resolveNodeRouting(plan.steps, registeredTools, nodes) };
+      validation = validatePlan(plan, { tools: registeredTools, nodes });
+      const domainsChanged = plan.steps.some(step => !WEAK_DOMAINS.has(step.toolName.split('.')[0] as Domain));
+      console.warn(
+        `[NLPlanningService] weak-domain-only plan for task "${task}" despite inferred `
+        + `${otherDomains.join('/')} domain(s); retry valid: ${validation.valid}; domains changed: ${domainsChanged}`,
+      );
+      return validation.valid ? validation.plan : originalPlan;
+    }
 
     // hiba-planner sometimes invents a plausible-sounding tool name that was
     // never in the catalog (e.g. "env.readTemperature" instead of the
