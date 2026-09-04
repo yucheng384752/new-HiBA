@@ -23,6 +23,43 @@ import type {
 
 export type { NodeResourceMap, ResourceItem } from '../types/hiba.types';
 
+export type Domain = 'material' | 'machine' | 'man' | 'method' | 'env' | 'orchestrator';
+
+// 補充清單來源：2026-09-04 live 驗證揪出「通知」/「更新」這類過於通用的
+// 關鍵字會把候選範圍鎖死在錯的 domain（man.sendAlert 取代真正該用的
+// env/machine 工具，見 20260904-retrievecontext-domain-narrowing.md 的
+// Test Plan）。修法不是移除這兩個詞，而是把正確 domain 的關鍵字補齊，讓
+// 命中變成聯集（例如「過熱」同時登記進 env 跟 machine），這樣 man/
+// orchestrator 就不再是唯一候選。事件類詞彙（過熱/異音/故障/停機/警報）
+// 刻意跨域登記，因為同一個詞在不同任務裡可能對應不同 domain；「異常」這種
+// 幾乎每個 domain 都適用的詞則刻意不收錄，收錄了會讓窄化名存實亡。
+const DOMAIN_KEYWORDS: Record<Domain, string[]> = {
+  material: ['保護', '驗證', '批號', '批次', '庫存', '料號', 'bom', '用料', '進料', '檢驗', '效期', '有效期限',
+    '附件', '檔案', '追蹤', '追溯', '儲位', '庫位', '領料', '收料', '上傳',
+    'protect', 'verify', 'lot', 'stock', 'attachment', 'expiry', 'incoming'],
+  machine: ['機台', '運作狀態', '稼動率', 'oee', '保養', '警報', '校正', '工單',
+    '良率', '良品率', '效能率', '過熱', '異音', '故障', '停機',
+    'machine', 'alarm', 'calib', 'pm schedule', 'order'],
+  man: ['操作員', '員工', '登入', '班別', '班表', '班次', '證照', '資格', '證書', '技能', '通知',
+    '出勤', '請假', '排班',
+    'operator', 'shift', 'cert', 'skill', 'alert'],
+  method: ['sop', '製程', '參數', '規格', '變更', 'ecn', '稽核', '合規', 'iatf', 'param',
+    '作業指導書', '標準作業程序', '量測', '公差', '工程變更',
+    'compliance', 'audit'],
+  env: ['溫度', '濕度', '潔淨室', '粒子', '閾值', '感測器', '檔案系統', '讀寫',
+    '過熱', '警報',
+    'temperature', 'humidity', 'cleanroom', 'threshold', 'sensor', 'probe'],
+  orchestrator: ['節點', '部署', '回響', '延遲', '安裝', '更新', '註冊', 'node', 'agent', 'deploy', 'rtt'],
+};
+
+export function inferDomainsFromIntent(task: string): Domain[] | undefined {
+  const normalized = task.toLowerCase();
+  const domains = (Object.entries(DOMAIN_KEYWORDS) as Array<[Domain, string[]]>)
+    .filter(([, keywords]) => keywords.some(keyword => normalized.includes(keyword)))
+    .map(([domain]) => domain);
+  return domains.length > 0 ? domains : undefined;
+}
+
 // ── Pluggable Interfaces ───────────────────────────────────────────────────────
 // Both interfaces are minimal — swap any implementation without touching the service.
 
@@ -309,9 +346,10 @@ export class NLPlanningService {
     if (!this.options.toolbox) return registeredTools;
 
     try {
+      const domains = inferDomainsFromIntent(task);
       const result = await this.options.toolbox.execute<{ tools: Array<{ name: string }> }>(
         'orchestrator.retrieveContext',
-        { intent: task },
+        { intent: task, ...(domains && { domains }) },
         ctx,
       );
       if (!result.success) {

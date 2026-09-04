@@ -1,5 +1,6 @@
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import {
+  inferDomainsFromIntent,
   NLPlanningService,
   resolveNodeRouting,
   type LLMClient,
@@ -118,6 +119,25 @@ describe('NLPlanningService', () => {
   beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
   afterEach(() => { jest.restoreAllMocks(); });
 
+  it.each([
+    ['請保護這個檔案', 'material'],
+    ['查詢機台狀態', 'machine'],
+    ['確認操作員技能', 'man'],
+    ['取得最新 SOP', 'method'],
+    ['讀取感測器溫度', 'env'],
+    ['測量節點 RTT', 'orchestrator'],
+  ])('infers %s as the %s domain', (task, domain) => {
+    expect(inferDomainsFromIntent(task)).toContain(domain);
+  });
+
+  it('returns every domain matched by a mixed intent', () => {
+    expect(inferDomainsFromIntent('讀取附件後依照 SOP 處理')).toEqual(['material', 'method']);
+  });
+
+  it('returns undefined when the intent has no known domain keyword', () => {
+    expect(inferDomainsFromIntent('請協助處理這件事情')).toBeUndefined();
+  });
+
   it('returns a valid ExecutionPlan when LLM produces correct JSON', async () => {
     const llm        = makeLLM(validPlanJson);
     const accounting = makeAccounting();
@@ -179,11 +199,31 @@ describe('NLPlanningService', () => {
 
     expect(execute).toHaveBeenCalledWith(
       'orchestrator.retrieveContext',
-      { intent: 'protect a file' },
+      { intent: 'protect a file', domains: ['material'] },
       ctx,
     );
     expect(llm.complete.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(
       retrievalCatalog.slice(0, 3).map(tool => tool.name),
+    );
+  });
+
+  it('omits domains from retrieveContext input when none can be inferred', async () => {
+    const execute = jest.fn<() => Promise<unknown>>().mockResolvedValue({
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: { tools: retrievalCatalog.map(tool => ({ name: tool.name, score: 1 })) },
+      auditHash: 'hash', durationMs: 1, executedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const svc = new NLPlanningService(makeLLM(validPlanJson), makeAccounting(), {
+      toolbox: { list: () => retrievalCatalog, execute: execute as unknown as HiBAToolbox['execute'] },
+    });
+
+    await svc.plan('請協助處理這件事情', ctx);
+
+    expect(execute).toHaveBeenCalledWith(
+      'orchestrator.retrieveContext',
+      { intent: '請協助處理這件事情' },
+      ctx,
     );
   });
 

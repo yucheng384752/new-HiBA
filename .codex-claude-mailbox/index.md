@@ -8,3 +8,4 @@
 | 20260903-nl-workflow-protect-verify | 自然語言觸發 Protect/Verify Workflow | completed | claude | claude | 2026-09-03T21:15:00+08:00 |
 | 20260903-plan-local-tool-routing | plan() 無法正確規劃本機專屬工具（nodeId='local'） | completed | claude | claude | 2026-09-04T04:00:00+08:00 |
 | 20260904-retrievecontext-wire-into-plan | 把 orchestrator.retrieveContext 接進 plan()（僅接線＋fallback） | completed | codex | claude | 2026-09-04T12:40:00+08:00 |
+| 20260904-retrievecontext-domain-narrowing | orchestrator.retrieveContext 加入 domains 語意窄化（確定性關鍵字比對） | completed | codex | claude | 2026-09-04T14:10:00+08:00 |
