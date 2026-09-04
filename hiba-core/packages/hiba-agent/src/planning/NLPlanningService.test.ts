@@ -1,4 +1,4 @@
-import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import {
   NLPlanningService,
   resolveNodeRouting,
@@ -7,9 +7,10 @@ import {
   type NodeResourceMap,
 } from './NLPlanningService';
 import { z } from 'zod';
-import { defineTool } from '../core/defineTool';
+import { defineTool, type RegisteredTool } from '../core/defineTool';
+import type { HiBAToolbox } from '../core/HiBAToolbox';
 import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
-import type { NodeDescriptor, PlanStep, ToolContext } from '../types/hiba.types';
+import type { NodeDescriptor, PlanStep, ToolContext, ToolResult } from '../types/hiba.types';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -48,6 +49,13 @@ const protectFileTool = defineTool({
   timeout: 1_000,
   handler: async () => ({ ok: true }),
 });
+
+const retrievalCatalog: RegisteredTool[] = [
+  protectFileTool,
+  { ...protectFileTool, name: 'material.verifyFile' },
+  { ...protectFileTool, name: 'material.readFile' },
+  { ...protectFileTool, name: 'material.writeFile' },
+];
 
 const validPlanJson = {
   steps: [
@@ -90,9 +98,26 @@ function makeAccountingWithNodes(resources: NodeResourceMap, nodes: NodeDescript
   };
 }
 
+function makeToolbox(tools: RegisteredTool[]): Pick<HiBAToolbox, 'list' | 'execute'> {
+  return {
+    list: () => tools,
+    execute: async <TOutput = unknown>(): Promise<ToolResult<TOutput>> => ({
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: { tools: tools.map(tool => ({ name: tool.name, score: 1 })) } as TOutput,
+      auditHash: 'hash', durationMs: 1, executedAt: '2026-01-01T00:00:00.000Z',
+    }),
+  };
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 describe('NLPlanningService', () => {
+  let warn: jest.SpiedFunction<typeof console.warn>;
+
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => undefined); });
+  afterEach(() => { jest.restoreAllMocks(); });
+
   it('returns a valid ExecutionPlan when LLM produces correct JSON', async () => {
     const llm        = makeLLM(validPlanJson);
     const accounting = makeAccounting();
@@ -121,7 +146,7 @@ describe('NLPlanningService', () => {
   it('includes complete ToolSpec in LLM payload when toolbox is provided', async () => {
     const llm = makeLLM(validPlanJson);
     const svc = new NLPlanningService(llm, makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     await svc.plan('task', ctx);
@@ -138,13 +163,73 @@ describe('NLPlanningService', () => {
     );
   });
 
+  it('uses retrieveContext tool matches when at least three registered tools are returned', async () => {
+    const llm = makeLLM(validPlanJson);
+    const execute = jest.fn<() => Promise<unknown>>().mockResolvedValue({
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: { tools: retrievalCatalog.slice(0, 3).map(tool => ({ name: tool.name, score: 1 })) },
+      auditHash: 'hash', durationMs: 1, executedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => retrievalCatalog, execute: execute as unknown as HiBAToolbox['execute'] },
+    });
+
+    await svc.plan('protect a file', ctx);
+
+    expect(execute).toHaveBeenCalledWith(
+      'orchestrator.retrieveContext',
+      { intent: 'protect a file' },
+      ctx,
+    );
+    expect(llm.complete.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(
+      retrievalCatalog.slice(0, 3).map(tool => tool.name),
+    );
+  });
+
+  it('falls back to the full tool catalog when retrieveContext returns fewer than three matches', async () => {
+    const llm = makeLLM(validPlanJson);
+    const execute = jest.fn<() => Promise<unknown>>().mockResolvedValue({
+      success: true,
+      protocolVersion: HIBA_PROTOCOL_VERSION,
+      output: { tools: [{ name: protectFileTool.name, score: 1 }] },
+      auditHash: 'hash', durationMs: 1, executedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => retrievalCatalog, execute: execute as unknown as HiBAToolbox['execute'] },
+    });
+
+    await svc.plan('protect a file', ctx);
+
+    expect(llm.complete.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(
+      retrievalCatalog.map(tool => tool.name),
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('returned 1 matching tools'));
+  });
+
+  it('falls back to the full tool catalog when retrieveContext throws', async () => {
+    const llm = makeLLM(validPlanJson);
+    const execute = jest.fn<() => Promise<unknown>>().mockRejectedValue(new Error('context timeout'));
+    const svc = new NLPlanningService(llm, makeAccounting(), {
+      toolbox: { list: () => retrievalCatalog, execute: execute as unknown as HiBAToolbox['execute'] },
+    });
+
+    await expect(svc.plan('protect a file', ctx)).resolves.toEqual(
+      expect.objectContaining({ steps: validPlanJson.steps }),
+    );
+    expect(llm.complete.mock.calls[0]![0].tools.map(tool => tool.name)).toEqual(
+      retrievalCatalog.map(tool => tool.name),
+    );
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('context timeout'));
+  });
+
   it('returns structured missingInputs when deterministic validation rejects a plan', async () => {
     const invalidInputPlan = {
       ...validPlanJson,
       steps: [{ ...validPlanJson.steps[0], input: {} }],
     };
     const svc = new NLPlanningService(makeLLM(invalidInputPlan), makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     const plan = await svc.plan('protect a file', ctx);
@@ -173,7 +258,7 @@ describe('NLPlanningService', () => {
         .mockResolvedValueOnce({ rawJson: validPlanJson }),
     };
     const svc = new NLPlanningService(llm, makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     const plan = await svc.plan('protect a file', ctx);
@@ -195,7 +280,7 @@ describe('NLPlanningService', () => {
     };
     const llm = makeLLM(hallucinatedPlan); // every call returns the same hallucinated plan
     const svc = new NLPlanningService(llm, makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     const plan = await svc.plan('protect a file', ctx);
@@ -288,7 +373,7 @@ describe('NLPlanningService', () => {
       ],
     };
     const svc = new NLPlanningService(makeLLM(rawPlan), makeAccounting(), {
-      toolbox: { list: () => [protectFileTool] },
+      toolbox: makeToolbox([protectFileTool]),
     });
 
     const plan = await svc.plan('先處理第一項，然後接續處理第二項', ctx);
@@ -338,7 +423,7 @@ describe('NLPlanningService', () => {
         { ...mockNodes[0]!, nodeId: 'node-1', status: 'offline', resources: [] },
       ];
       const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
-        toolbox: { list: () => [protectFileTool] },
+        toolbox: makeToolbox([protectFileTool]),
       });
 
       const plan = await svc.plan('保護這個檔案', ctx);
@@ -355,7 +440,7 @@ describe('NLPlanningService', () => {
         },
       ];
       const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
-        toolbox: { list: () => [protectFileTool] },
+        toolbox: makeToolbox([protectFileTool]),
       });
 
       const plan = await svc.plan('保護這個檔案', ctx);
@@ -368,7 +453,7 @@ describe('NLPlanningService', () => {
         { ...mockNodes[0]!, nodeId: 'node-3', status: 'online', canInstall: true, resources: [] },
       ];
       const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
-        toolbox: { list: () => [protectFileTool] },
+        toolbox: makeToolbox([protectFileTool]),
       });
 
       const plan = await svc.plan('保護這個檔案', ctx);

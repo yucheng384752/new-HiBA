@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import type { RegisteredTool } from '../core/defineTool';
 import { toToolSpec } from '../core/defineTool';
+import type { HiBAToolbox } from '../core/HiBAToolbox';
 import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
 import type {
   ExecutionPlan,
@@ -187,7 +188,7 @@ export interface NLPlanningOptions {
   /** Fallback supervisorPolicy when LLM omits it */
   supervisorPolicy?: 'fail-fast' | 'partial-success';
   /** If provided, tool names are included in LLM context */
-  toolbox?: { list(): RegisteredTool[] };
+  toolbox?: Pick<HiBAToolbox, 'list' | 'execute'>;
   /** Optional general-purpose model for execution summaries */
   summaryLLM?: LLMClient;
 }
@@ -238,13 +239,14 @@ export class NLPlanningService {
     private readonly options: NLPlanningOptions = {},
   ) {}
 
-  async plan(task: string, _ctx: ToolContext): Promise<ExecutionPlan> {
+  async plan(task: string, ctx: ToolContext): Promise<ExecutionPlan> {
     const [resources, nodes] = await Promise.all([
       this.accounting.listNodeResources(),
       this.accounting.listNodes(),
     ]);
     const registeredTools = this.options.toolbox?.list() ?? [];
-    const tools = registeredTools.map(toToolSpec);
+    const scopedTools = await this.retrieveScopedTools(task, ctx, registeredTools);
+    const tools = scopedTools.map(toToolSpec);
     const isPlannerVisible = (resource: ResourceItem) => resource.metadata?.['plannerVisible'] !== false;
     const planningResources = Object.fromEntries(
       Object.entries(resources).map(([nodeId, items]) => [nodeId, items.filter(isPlannerVisible)]),
@@ -297,6 +299,43 @@ export class NLPlanningService {
       validationIssues: validation.issues,
       missingInputs: validation.missingInputs,
     };
+  }
+
+  private async retrieveScopedTools(
+    task: string,
+    ctx: ToolContext,
+    registeredTools: RegisteredTool[],
+  ): Promise<RegisteredTool[]> {
+    if (!this.options.toolbox) return registeredTools;
+
+    try {
+      const result = await this.options.toolbox.execute<{ tools: Array<{ name: string }> }>(
+        'orchestrator.retrieveContext',
+        { intent: task },
+        ctx,
+      );
+      if (!result.success) {
+        console.warn(
+          `[NLPlanningService] retrieveContext failed (${result.errorCode}: ${result.error}); using full tool catalog`,
+        );
+        return registeredTools;
+      }
+
+      const scopedTools = registeredTools.filter(tool =>
+        result.output.tools.some(retrieved => retrieved.name === tool.name));
+      if (scopedTools.length < 3) {
+        console.warn(
+          `[NLPlanningService] retrieveContext returned ${scopedTools.length} matching tools; using full tool catalog`,
+        );
+        return registeredTools;
+      }
+      return scopedTools;
+    } catch (error) {
+      console.warn(
+        `[NLPlanningService] retrieveContext threw ${error instanceof Error ? error.message : String(error)}; using full tool catalog`,
+      );
+      return registeredTools;
+    }
   }
 
   /** Calls the LLM once, parses its output, and applies input coercion / dependsOn inference. */
