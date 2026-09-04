@@ -304,6 +304,20 @@ live 驗證三個邊界案例：
 重測維持正確、無回歸。Thread 狀態改為 `completed`；「異常」這類過度
 通用詞刻意不收錄的決定維持不變。
 
+**訂正（Claude，2026-09-04，於後續 thread
+`20260904-plan-self-correction-weak-domain-retry` 的 live 驗證中發現）**：
+上方案例 4／6 描述的「`status:"planned"`、無任何 error、完全靜默的
+語意錯誤」不夠精確——當時的驗證腳本只印了 `status`／`error`，沒有印
+`validationIssues`。後續補印完整回應後發現，過熱／異音這兩個案例的
+`man.sendAlert` 呼叫幾乎必定**同時**因為一個完全無關的欄位問題觸發
+`validationIssues`（`priority` 穩定回傳不在 enum 允許值裡的
+`"high"`，或 `employeeId`/`message` 留空）——也就是說呼叫端**不是
+完全看不到任何問題訊號**，只是訊號指向錯誤的原因（欄位缺漏，不是
+domain 選錯）。核心結論（模型選錯 domain、選了 `man.sendAlert` 而非
+`env`/`machine` 工具）依然成立，只是「完全靜默」這個描述需要訂正為
+「選錯了，但剛好也伴隨一個不相關的欄位驗證錯誤，不是零訊號」。不影響
+這個 thread 本身已完成的關鍵字表修正的正確性。
+
 # Session Summary
 
 延續上一個 thread 的 Open Questions，這次讓 `orchestrator.retrieveContext`

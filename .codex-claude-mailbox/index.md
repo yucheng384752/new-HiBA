@@ -10,3 +10,4 @@
 | 20260904-retrievecontext-wire-into-plan | 把 orchestrator.retrieveContext 接進 plan()（僅接線＋fallback） | completed | codex | claude | 2026-09-04T12:40:00+08:00 |
 | 20260904-retrievecontext-domain-narrowing | orchestrator.retrieveContext 加入 domains 語意窄化（確定性關鍵字比對） | completed | codex | claude | 2026-09-04T14:10:00+08:00 |
 | 20260904-plan-self-correction-weak-domain-retry | plan() 生成後自我修正：man/orchestrator 單獨作答但任務涉及其他 domain 時重試一次 | completed | codex | claude | 2026-09-04T15:40:00+08:00 |
+| 20260904-mansendalert-priority-enum-fix | man.sendAlert priority enum 不接受模型常用的 "high" | completed | claude | claude | 2026-09-04T16:10:00+08:00 |

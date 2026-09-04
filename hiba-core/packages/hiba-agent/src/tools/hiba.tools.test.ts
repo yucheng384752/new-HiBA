@@ -49,6 +49,40 @@ describe('allHibaTools', () => {
   });
 });
 
+// hiba-planner:v1-optimized 對「緊急/過熱」這類任務穩定回傳英文 "high"
+// （不在原本三個合法值內），見
+// .codex-claude-mailbox/threads/20260904-mansendalert-priority-enum-fix.md
+describe('man.sendAlert priority normalization', () => {
+  const parsePriority = (priority: unknown) => {
+    const tool = allHibaTools.find(item => item.name === 'man.sendAlert');
+    return tool!.inputSchema.safeParse({ employeeId: 'E1', message: 'hi', priority });
+  };
+
+  test('normalizes "high" to "urgent"', () => {
+    const parsed = parsePriority('high');
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect((parsed.data as { priority: string }).priority).toBe('urgent');
+  });
+
+  test.each(['low', 'normal', 'urgent'])('still accepts existing valid value %s', value => {
+    const parsed = parsePriority(value);
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect((parsed.data as { priority: string }).priority).toBe(value);
+  });
+
+  test('still defaults to "normal" when omitted', () => {
+    const tool = allHibaTools.find(item => item.name === 'man.sendAlert');
+    const parsed = tool!.inputSchema.safeParse({ employeeId: 'E1', message: 'hi' });
+    expect(parsed.success).toBe(true);
+    if (parsed.success) expect((parsed.data as { priority: string }).priority).toBe('normal');
+  });
+
+  test('still rejects unknown values', () => {
+    const parsed = parsePriority('critical');
+    expect(parsed.success).toBe(false);
+  });
+});
+
 describe('registerHibaTools', () => {
   let toolbox: HiBAToolbox;
   beforeEach(() => { toolbox = makeToolbox(); });
