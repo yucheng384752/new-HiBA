@@ -502,7 +502,15 @@ const manSendAlert = defineTool({
   inputSchema: z.object({
     employeeId: z.string().describe('員工 ID'),
     message:    z.string().describe('通知內容'),
-    priority:   z.enum(['low', 'normal', 'urgent']).default('normal').describe('優先等級'),
+    // hiba-planner:v1-optimized 對「緊急/過熱」這類任務穩定回傳英文
+    // "high"（不在原本三個合法值內），見
+    // .codex-claude-mailbox/threads/20260904-mansendalert-priority-enum-fix.md
+    // ——用 preprocess 把這個常見同義詞正規化成 'urgent'，enum 本身維持
+    // 三個值，不擴大成四個值造成未來實作 handler 時的歧義。
+    priority:   z.preprocess(
+      value => (value === 'high' ? 'urgent' : value),
+      z.enum(['low', 'normal', 'urgent']).default('normal'),
+    ).describe('優先等級'),
   }),
   outputSchema: z.object({
     success:     z.boolean(),
