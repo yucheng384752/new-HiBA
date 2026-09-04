@@ -1,6 +1,7 @@
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 import {
   NLPlanningService,
+  resolveNodeRouting,
   type LLMClient,
   type AccountingClient,
   type NodeResourceMap,
@@ -8,7 +9,7 @@ import {
 import { z } from 'zod';
 import { defineTool } from '../core/defineTool';
 import { HIBA_PROTOCOL_VERSION } from '../types/hiba.types';
-import type { NodeDescriptor, ToolContext } from '../types/hiba.types';
+import type { NodeDescriptor, PlanStep, ToolContext } from '../types/hiba.types';
 
 // ── Fixtures ───────────────────────────────────────────────────────────────────
 
@@ -72,6 +73,13 @@ function makeAccounting(resources: NodeResourceMap = mockResources): jest.Mocked
   const nodes = Object.entries(resources).map(([nodeId, nodeResources]) => ({
     ...mockNodes[0]!, nodeId, agentUrl: `http://${nodeId}`, resources: nodeResources,
   }));
+  return makeAccountingWithNodes(resources, nodes);
+}
+
+// Like makeAccounting(), but lets a test set node status/canInstall explicitly
+// instead of always defaulting to online — needed to exercise
+// resolveNodeRouting's offline/no-capable-node/canInstall branches.
+function makeAccountingWithNodes(resources: NodeResourceMap, nodes: NodeDescriptor[]): jest.Mocked<AccountingClient> {
   return {
     listNodeResources: jest.fn<AccountingClient['listNodeResources']>().mockResolvedValue(resources),
     getNodeResources:  jest.fn<AccountingClient['getNodeResources']>().mockResolvedValue([]),
@@ -304,6 +312,108 @@ describe('NLPlanningService', () => {
       resources: { node1: [visible] },
       nodes: [expect.objectContaining({ resources: [visible] })],
     }));
+  });
+
+  describe('resolveNodeRouting (nodeId correction inside plan())', () => {
+    // hiba-planner has been observed (see
+    // .codex-claude-mailbox/threads/20260903-plan-local-tool-routing.md) to
+    // copy a worked-example literal like "node1" verbatim even when no real
+    // node is named that, instead of routing to a genuine local-only tool.
+    // These tests exercise the deterministic correction that stands in for
+    // the prompt-side fix that turned out to overflow the deployed model's
+    // context window.
+    const hallucinatedNodePlan = {
+      steps: [{
+        stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node1',
+        version: '1.0.0', input: { filePath: '/tmp/report.xml' }, dependsOn: [],
+      }],
+      supervisorPolicy: 'fail-fast',
+    };
+
+    it('routes to "local" when no real/online node matches and the tool is registered locally', async () => {
+      // "node1" here is NOT a real node in this fixture (contrast with the
+      // top-of-file mockNodes, where node1 IS real) — every real node is
+      // offline and none advertise material.protectFile.
+      const nodes: NodeDescriptor[] = [
+        { ...mockNodes[0]!, nodeId: 'node-1', status: 'offline', resources: [] },
+      ];
+      const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
+        toolbox: { list: () => [protectFileTool] },
+      });
+
+      const plan = await svc.plan('保護這個檔案', ctx);
+
+      expect(plan.error).toBeUndefined();
+      expect(plan.steps[0]!.nodeId).toBe('local');
+    });
+
+    it('routes to a real online capable node instead of "local" when one exists', async () => {
+      const nodes: NodeDescriptor[] = [
+        {
+          ...mockNodes[0]!, nodeId: 'node-2', status: 'online', canInstall: false,
+          resources: [{ name: 'material.protectFile', type: 'tool', version: '1.0.0' }],
+        },
+      ];
+      const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
+        toolbox: { list: () => [protectFileTool] },
+      });
+
+      const plan = await svc.plan('保護這個檔案', ctx);
+
+      expect(plan.steps[0]!.nodeId).toBe('node-2');
+    });
+
+    it('routes to a real online canInstall node when no node advertises the tool directly', async () => {
+      const nodes: NodeDescriptor[] = [
+        { ...mockNodes[0]!, nodeId: 'node-3', status: 'online', canInstall: true, resources: [] },
+      ];
+      const svc = new NLPlanningService(makeLLM(hallucinatedNodePlan), makeAccountingWithNodes({}, nodes), {
+        toolbox: { list: () => [protectFileTool] },
+      });
+
+      const plan = await svc.plan('保護這個檔案', ctx);
+
+      expect(plan.steps[0]!.nodeId).toBe('node-3');
+    });
+
+    // The next two cases test resolveNodeRouting() directly rather than
+    // through plan(): when validatePlan() ends up rejecting the plan anyway
+    // (AGENT_NOT_REGISTERED, with no INPUT_REQUIRED/INPUT_INVALID issue to
+    // let the caller fix it), plan() clears steps to [] before returning
+    // (existing behavior, unrelated to this correction) — so the corrected
+    // (or deliberately un-corrected) nodeId isn't observable from plan()'s
+    // return value in these two cases.
+    it('leaves nodeId untouched when no real fallback exists (no online node, tool not local)', () => {
+      const steps: PlanStep[] = [{
+        stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node1',
+        version: '1.0.0', input: { filePath: '/tmp/report.xml' }, dependsOn: [],
+      }];
+      const nodes: NodeDescriptor[] = [
+        { ...mockNodes[0]!, nodeId: 'node-1', status: 'offline', resources: [] },
+      ];
+
+      const corrected = resolveNodeRouting(steps, [], nodes); // no registered tools at all
+
+      expect(corrected[0]!.nodeId).toBe('node1'); // unchanged from the LLM's raw output
+    });
+
+    it('never overrides a nodeId that matches a real (even offline/incapable) node', () => {
+      // node-1 is real but offline and doesn't advertise the tool — this must
+      // be left alone so validatePlan() surfaces AGENT_NOT_REGISTERED,
+      // never get silently rerouted, per the existing "never replace an
+      // explicitly requested node with local" rule.
+      const steps: PlanStep[] = [{
+        stepId: 'S1', toolName: 'material.protectFile', nodeId: 'node-1',
+        version: '1.0.0', input: { filePath: '/tmp/report.xml' }, dependsOn: [],
+      }];
+      const nodes: NodeDescriptor[] = [
+        { ...mockNodes[0]!, nodeId: 'node-1', status: 'offline', resources: [] },
+      ];
+
+      const corrected = resolveNodeRouting(steps, [protectFileTool], nodes);
+
+      expect(corrected[0]!.nodeId).toBe('node-1'); // not silently rerouted to "local"
+    });
   });
 
   it('summarizes execution results with a fact-only prompt', async () => {

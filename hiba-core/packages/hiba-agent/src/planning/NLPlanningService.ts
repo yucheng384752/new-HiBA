@@ -192,6 +192,45 @@ export interface NLPlanningOptions {
   summaryLLM?: LLMClient;
 }
 
+/**
+ * Deterministically corrects step.nodeId when the LLM's choice doesn't refer
+ * to any real registered node — e.g. a worked-example literal like "node1"
+ * copied verbatim rather than a genuine node reference (see
+ * .codex-claude-mailbox/threads/20260903-plan-local-tool-routing.md).
+ * Prompt-side fixes for this hit a hard context-window ceiling on the
+ * deployed model, so routing is resolved here instead: this is a
+ * deterministic transform over known node/tool data, not a judgment call,
+ * so it belongs in code rather than in the prompt (project Rule 5).
+ *
+ * A nodeId that DOES match a real node — online, offline, or otherwise — is
+ * always left untouched, whether or not it later fails validatePlan(). That
+ * match is the only signal available that the LLM (or the task text) meant
+ * that specific node on purpose; overriding it would violate the existing
+ * "never replace an explicitly requested node with local" rule.
+ */
+export function resolveNodeRouting(
+  steps: PlanStep[],
+  registeredTools: RegisteredTool[],
+  nodes: NodeDescriptor[],
+): PlanStep[] {
+  return steps.map(step => {
+    if (step.nodeId === 'local') return step;
+    if (nodes.some(node => node.nodeId === step.nodeId)) return step;
+
+    const onlineCapable = nodes.find(node => node.status === 'online'
+      && node.resources.some(resource => resource.name === step.toolName && resource.version === step.version));
+    if (onlineCapable) return { ...step, nodeId: onlineCapable.nodeId };
+
+    const onlineInstallable = nodes.find(node => node.status === 'online' && node.canInstall);
+    if (onlineInstallable) return { ...step, nodeId: onlineInstallable.nodeId };
+
+    const runnableLocally = registeredTools.some(tool => tool.name === step.toolName && tool.version === step.version);
+    if (runnableLocally) return { ...step, nodeId: 'local' };
+
+    return step; // no real fallback exists — leave as-is, validatePlan reports AGENT_NOT_REGISTERED as before
+  });
+}
+
 export class NLPlanningService {
   constructor(
     private readonly llm: LLMClient,
@@ -217,6 +256,7 @@ export class NLPlanningService {
 
     let plan = await this.generateNormalizedPlan(task, registeredTools, tools, planningResources, planningNodes);
     if (plan.error || !this.options.toolbox) return plan;
+    plan = { ...plan, steps: resolveNodeRouting(plan.steps, registeredTools, nodes) };
 
     let validation = validatePlan(plan, { tools: registeredTools, nodes });
     if (validation.valid) return validation.plan;
@@ -237,6 +277,7 @@ export class NLPlanningService {
         + `"Available Tools", verbatim.)`;
       plan = await this.generateNormalizedPlan(correctedTask, registeredTools, tools, planningResources, planningNodes);
       if (plan.error) return plan;
+      plan = { ...plan, steps: resolveNodeRouting(plan.steps, registeredTools, nodes) };
       validation = validatePlan(plan, { tools: registeredTools, nodes });
       if (validation.valid) return validation.plan;
     }
